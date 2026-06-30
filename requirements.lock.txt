@@ -1,8 +1,12 @@
+aiohappyeyeballs==2.6.2
+aiohttp==3.14.1
+aiosignal==1.4.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.14.1
 arabic-reshaper==3.0.1
 astunparse==1.6.3
+attrs==26.1.0
 audioread==3.1.0
 av==17.1.0
 beautifulsoup4==4.15.0
@@ -15,7 +19,9 @@ contourpy==1.3.3
 cryptography==49.0.0
 ctranslate2==4.8.0
 cycler==0.12.1
+datasets==5.0.0
 decorator==5.3.1
+dill==0.4.1
 elementpath==5.1.3
 esprima==4.0.1
 et_xmlfile==2.0.0
@@ -25,7 +31,8 @@ filelock==3.29.4
 flatbuffers==25.12.19
 fonttools==4.63.0
 freetype-py==2.5.1
-fsspec==2026.6.0
+frozenlist==1.8.0
+fsspec==2026.4.0
 future==1.0.0
 gevent==25.5.1
 gitdb==4.0.12
@@ -55,6 +62,8 @@ meshpy==2026.1
 moviepy==2.2.1
 msgpack==1.2.1
 msgpack-numpy==0.4.8
+multidict==6.7.1
+multiprocess==0.70.19
 narwhals==2.22.1
 ndindex==1.10.1
 numba==0.65.1
@@ -70,6 +79,7 @@ pillow==11.3.0
 platformdirs==4.10.0
 pooch==1.9.0
 proglog==0.1.12
+propcache==0.5.2
 protobuf==7.35.1
 psutil==7.2.2
 psychopy==2026.1.3
@@ -281,6 +291,8 @@ websockets==16.0
 wxPython==4.2.5
 xarray==2026.4.0
 xmlschema==4.3.2
+xxhash==3.8.0
+yarl==1.24.2
 zeroconf==0.150.0
 zope.event==5.0
 zope.interface==7.2

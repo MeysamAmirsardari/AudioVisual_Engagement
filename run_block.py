@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Cross-Modal Attention EEG Experiment -- Single Block Runner
-===========================================================
+run_block.py — r un ONE block of the cross-modal (audio vs. visual) attention
+experiment, using a stimulus library that was prepared ONCE by build_stimuli.py.
 
-This self-contained script runs ONE experimental block of a cross-modal
-(audio vs. visual) attention paradigm in PsychoPy.
+What this script does NOT do anymore: it does not synthesise audio or run any
+forced alignment. All auditory stimuli + word onsets are read from the prepared
+library (stims/ + stims/manifest.json). That makes every session fast, reusable,
+and reproducible. (Because it never imports faster-whisper / PyAV, there is also
+no PyAV-vs-ffpyplayer conflict to work around.)
 
-It solves a "missing asset" problem entirely with local compute on Apple
-Silicon:
+Block flow
+----------
+  1. Instruction  — LEFT arrow = attend Audio, RIGHT arrow = attend Visual.
+  2. Buffer gap   — fixation cross for exactly 1.000 s (frame-counted).
+  3. Audiovisual  — muted, scaled tetris.mp4 + a selected speech clip, started
+                    synchronously (PTB flip-scheduled audio onset), capped.
+  4. Attention    — a yes/no probe about the ATTENDED stream (a target word for
+       check         audio; a configured game question for visual), scored.
+  5. Logging      — choice, AV onset, stimulus ids, probe + response + accuracy
+                    written to behavior/.
 
-    * The VISUAL stimulus already exists  ->  stim_files/tetris.mp4
-    * The AUDITORY stimulus does NOT exist yet. So, BEFORE the window opens,
-      the script:
-          1. Synthesises a continuous English speech track from a hardcoded
-             paragraph (gTTS by default; offline pyttsx3 fallback).
-          2. Runs a LOCAL Whisper model (faster-whisper) to extract strict,
-             millisecond-level word-onset/offset timestamps.
-          3. Writes those boundaries to both .json and .csv.
-
-Experimental flow (executed in this exact order):
-    1. Instruction screen -> wait for LEFT (Audio) or RIGHT (Visual).
-    2. Buffer gap         -> fixation cross for EXACTLY 1.000 s (frame-counted).
-    3. Audiovisual block  -> tetris.mp4 (muted) + generated speech, started
-                             synchronously and run concurrently.
-    4. Data logging       -> choice, AV-onset timestamp, word-boundary path.
-
-Author: generated for an Apple Silicon (M-series) / macOS target.
+Everything configurable lives in config.yaml. Run the builder first:
+    python build_stimuli.py
+    python run_block.py --subject sub01
 """
 
 from __future__ import annotations
@@ -36,290 +33,66 @@ import csv
 import datetime as _dt
 import json
 import os
+import random
 import sys
 import time
 
-# ---------------------------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------------------------
-# Everything tunable lives here so the experimental logic below stays clean.
-
-# Resolve paths relative to THIS file so the script can be launched from
-# anywhere (e.g. an IDE "Run" button or `python run_block.py`).
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-VIDEO_PATH = os.path.join(BASE_DIR, "stim_files", "tetris.mp4")
-
-# Generated assets (audio + boundaries) live here; created on demand.
-GEN_DIR = os.path.join(BASE_DIR, "generated")
-DATA_DIR = os.path.join(BASE_DIR, "data")
-
-# Standardised auditory-stimulus artefacts.
-SPEECH_WAV = os.path.join(GEN_DIR, "speech.wav")          # what PsychoPy plays
-BOUNDARY_JSON = os.path.join(GEN_DIR, "word_boundaries.json")
-BOUNDARY_CSV = os.path.join(GEN_DIR, "word_boundaries.csv")
-
-# --- Text to be spoken -------------------------------------------------------
-# Hardcoded English paragraph. Keep it continuous and clearly articulated so
-# the forced-aligner can find crisp word boundaries.
-SPEECH_TEXT = (
-    "Attention is the quiet gatekeeper of perception. "
-    "At every moment your senses deliver far more information than the mind can hold, "
-    "so the brain must choose what to keep and what to let slip away. "
-    "When you listen closely to a single voice in a crowded room, "
-    "the other sounds do not vanish, they simply fade into the background. "
-    "The same is true for vision, where a single moving shape can capture your focus "
-    "while everything around it dissolves into a soft and unremarkable blur. "
-    "In this experiment you will hold two streams in mind at once, "
-    "one for the ear and one for the eye, "
-    "and your task is simply to decide, before the block begins, "
-    "which of the two will receive your full attention."
-)
-
-# --- TTS engine selection ----------------------------------------------------
-# "gtts"    -> Google Text-to-Speech. Natural prosody, needs an internet
-#              connection, returns MP3 (decoded locally to WAV).
-# "pyttsx3" -> Fully OFFLINE macOS system voice (NSSpeechSynthesizer).
-TTS_ENGINE = "gtts"
-
-# --- Whisper (forced alignment) ---------------------------------------------
-# faster-whisper model size. "small.en" is a good speed/accuracy trade-off for
-# English on Apple Silicon CPU; use "base.en" for more speed, "medium.en" for
-# more accuracy. CTranslate2 has no Metal backend, so we run on CPU with int8.
-WHISPER_MODEL = "small.en"
-WHISPER_DEVICE = "cpu"
-WHISPER_COMPUTE = "int8"
-
-# --- Display / timing --------------------------------------------------------
-FULLSCREEN = True
-BG_COLOR = "black"
-TEXT_COLOR = "white"
-VIDEO_SCALE = 1.8          # Display the video at this multiple of its native
-                           # pixel size (aspect ratio preserved). 1.0 = native.
-GAP_SECONDS = 1.0          # The "buffer gap" duration (frame-counted).
-BLOCK_SECONDS = 30.0       # Hard cap on audiovisual playback: BOTH the video
-                           # and the audio are stopped at exactly this point,
-                           # regardless of their underlying file durations.
-FALLBACK_REFRESH = 60.0    # Hz, used only if PsychoPy can't measure the monitor.
-
-INSTRUCTION_TEXT = (
-    "Decide your attentional focus:\n\n"
-    "Press the LEFT arrow for Audio,\n"
-    "or the RIGHT arrow for Visual."
-)
+import cma_common as cc
 
 
 # ===========================================================================
-# STAGE 1 -- AUDIO SYNTHESIS
+# Stimulus selection
 # ===========================================================================
-def _log(msg: str) -> None:
-    """Tiny timestamped progress logger for the preprocessing phase."""
-    stamp = _dt.datetime.now().strftime("%H:%M:%S")
-    print(f"[{stamp}] {msg}", flush=True)
-
-
-def _normalise_to_wav(src_path: str, dst_wav: str) -> float:
-    """
-    Decode an arbitrary audio file (MP3/AIFF/WAV) to a mono float WAV that both
-    PsychoPy's audio backend and faster-whisper can consume reliably.
-
-    Returns the audio duration in seconds.
-
-    No system `ffmpeg` binary is required: modern `soundfile` (libsndfile >=1.1)
-    decodes MP3 directly; `librosa` is used only as a fallback.
-    """
-    import numpy as np
-    import soundfile as sf
-
-    data = None
-    sr = None
-    try:
-        # Primary path: libsndfile via soundfile (handles WAV/AIFF/FLAC/MP3).
-        data, sr = sf.read(src_path, dtype="float32", always_2d=False)
-    except Exception as exc:  # pragma: no cover - environment dependent
-        _log(f"soundfile could not read '{os.path.basename(src_path)}' "
-             f"({exc}); falling back to librosa.")
-        import librosa
-        data, sr = librosa.load(src_path, sr=None, mono=True)
-
-    # Collapse to mono if the decoder returned stereo.
-    if getattr(data, "ndim", 1) > 1:
-        data = data.mean(axis=1)
-
-    # Light peak-normalisation so playback level is consistent regardless of TTS.
-    peak = float(np.max(np.abs(data))) if data.size else 0.0
-    if peak > 0:
-        data = (data / peak) * 0.95
-
-    sf.write(dst_wav, data.astype("float32"), int(sr), subtype="PCM_16")
-    duration = float(len(data)) / float(sr) if sr else 0.0
-    return duration
-
-
-def generate_speech_audio(text: str, out_wav: str, engine: str = "gtts") -> float:
-    """
-    Synthesize `text` to a standardized mono WAV at `out_wav`.
-
-    Parameters
-    ----------
-    text   : the paragraph to speak.
-    out_wav: destination .wav path.
-    engine : "gtts" (online, natural) or "pyttsx3" (offline, system voice).
-
-    Returns
-    -------
-    The duration of the generated audio in seconds.
-    """
-    os.makedirs(os.path.dirname(out_wav), exist_ok=True)
-    _log(f"Generating speech with engine='{engine}' "
-         f"({len(text.split())} words)...")
-
-    if engine == "gtts":
-        # gTTS writes MP3; we then decode it locally to a normalised WAV.
-        from gtts import gTTS
-        tmp_mp3 = os.path.splitext(out_wav)[0] + "_raw.mp3"
-        gTTS(text=text, lang="en", slow=False).save(tmp_mp3)
-        _log("gTTS MP3 received; decoding to WAV...")
-        duration = _normalise_to_wav(tmp_mp3, out_wav)
-
-    elif engine == "pyttsx3":
-        # Fully offline. The macOS 'nsss' driver typically writes AIFF; we then
-        # normalise to WAV. runAndWait() must be called to flush the file.
-        import pyttsx3
-        tmp_aiff = os.path.splitext(out_wav)[0] + "_raw.aiff"
-        eng = pyttsx3.init()
-        eng.setProperty("rate", 175)  # words per minute
-        eng.save_to_file(text, tmp_aiff)
-        eng.runAndWait()
-        eng.stop()
-        if not (os.path.exists(tmp_aiff) and os.path.getsize(tmp_aiff) > 0):
-            raise RuntimeError(
-                "pyttsx3 produced no audio. Try TTS_ENGINE='gtts' instead."
-            )
-        _log("pyttsx3 audio received; normalising to WAV...")
-        duration = _normalise_to_wav(tmp_aiff, out_wav)
-
-    else:
-        raise ValueError(f"Unknown TTS engine: {engine!r}")
-
-    _log(f"Speech WAV written: {out_wav}  ({duration:.2f} s)")
-    return duration
-
-
-# ===========================================================================
-# STAGE 2 -- FORCED ALIGNMENT (WORD BOUNDARIES)
-# ===========================================================================
-def extract_word_boundaries(wav_path: str,
-                            json_path: str,
-                            csv_path: str,
-                            model_size: str = WHISPER_MODEL) -> list[dict]:
-    """
-    Run a LOCAL Whisper model with word-level timestamps over `wav_path` and
-    write strict word boundaries to both JSON and CSV.
-
-    All times are in SECONDS relative to the start of the audio file, which --
-    because audio onset == audiovisual onset in this paradigm -- is identical
-    to the time relative to the start of tetris.mp4 playback.
-
-    Returns the list of boundary dicts.
-    """
-    from faster_whisper import WhisperModel
-
-    _log(f"Loading faster-whisper model '{model_size}' "
-         f"(device={WHISPER_DEVICE}, compute={WHISPER_COMPUTE})...")
-    model = WhisperModel(model_size, device=WHISPER_DEVICE,
-                         compute_type=WHISPER_COMPUTE)
-
-    _log("Transcribing with word-level timestamps...")
-    # faster-whisper's mel filterbank does `mel_filters @ magnitudes`, which on
-    # numpy 2.x emits spurious SIMD floating-point warnings (divide-by-zero /
-    # overflow / invalid) from padding lanes. The transcription result is
-    # unaffected, so silence just that specific source of noise.
-    import warnings
-    warnings.filterwarnings("ignore", category=RuntimeWarning,
-                            module=r"faster_whisper\.feature_extractor")
-
-    # word_timestamps=True asks Whisper for per-word start/end via its
-    # cross-attention alignment. We pin the language to English for stability.
-    segments, info = model.transcribe(
-        wav_path,
-        language="en",
-        word_timestamps=True,
-        beam_size=5,
-    )
-
-    boundaries: list[dict] = []
-    for seg in segments:
-        # Each segment carries a list of Word objects when word_timestamps=True.
-        for w in (seg.words or []):
-            word = w.word.strip()
-            if not word:
-                continue
-            start_s = float(w.start)
-            end_s = float(w.end)
-            boundaries.append({
-                "word": word,
-                "start_s": round(start_s, 3),
-                "end_s": round(end_s, 3),
-                "start_ms": int(round(start_s * 1000.0)),
-                "end_ms": int(round(end_s * 1000.0)),
-                "duration_ms": int(round((end_s - start_s) * 1000.0)),
-                "confidence": round(float(getattr(w, "probability", 0.0) or 0.0), 3),
-            })
-
-    if not boundaries:
+def select_audio_stim(manifest: dict, rng: random.Random,
+                      audio_id: str | None) -> dict:
+    """Pick the audio stimulus for this block (specific id, or random)."""
+    items = manifest.get("audio", [])
+    if not items:
         raise RuntimeError(
-            "Whisper returned no words. Check that the audio is non-empty."
-        )
+            "No audio stimuli in the library. Run:  python build_stimuli.py")
+    if audio_id:
+        for e in items:
+            if e["id"] == audio_id:
+                return e
+        raise RuntimeError(f"audio id '{audio_id}' not found in manifest.")
+    return rng.choice(items)
 
-    # --- Write JSON ---------------------------------------------------------
-    os.makedirs(os.path.dirname(json_path), exist_ok=True)
-    payload = {
-        "audio_file": os.path.relpath(wav_path, BASE_DIR),
-        "language": getattr(info, "language", "en"),
-        "model": model_size,
-        "n_words": len(boundaries),
-        "note": "All times are seconds/ms relative to audio start == AV onset.",
-        "words": boundaries,
-    }
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    # --- Write CSV ----------------------------------------------------------
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["word", "start_s", "end_s",
-                        "start_ms", "end_ms", "duration_ms", "confidence"],
-        )
-        writer.writeheader()
-        writer.writerows(boundaries)
-
-    _log(f"Extracted {len(boundaries)} word boundaries.")
-    _log(f"  JSON -> {json_path}")
-    _log(f"  CSV  -> {csv_path}")
-    return boundaries
+def _resolve(paths: cc.Paths, rel: str) -> str:
+    """Resolve a manifest path (relative to the stim dir) to an absolute path."""
+    return rel if os.path.isabs(rel) else os.path.join(paths.stim_dir, rel)
 
 
 # ===========================================================================
-# STAGE 3 -- THE EXPERIMENT (PsychoPy)
+# Experiment
 # ===========================================================================
-def run_experiment(subject: str,
-                   speech_wav: str,
-                   boundary_json: str,
-                   audio_duration: float) -> None:
-    """
-    Open the PsychoPy window and run the single block:
-        instruction -> 1.0 s fixation gap -> synchronous audiovisual playback.
+def run_experiment(cfg: dict, paths: cc.Paths, audio_entry: dict,
+                   subject: str, block_index: int, rng: random.Random) -> None:
+    """Open the PsychoPy window and run the single block + probe."""
+    exp = cfg["experiment"]
 
-    PsychoPy is imported INSIDE this function so that all heavy preprocessing
-    (and its console output) completes before any window/graphics context opens.
-    """
+    # --- Resolve + validate assets BEFORE opening any window ----------------
+    audio_wav = _resolve(paths, audio_entry["audio_path"])
+    words_file = _resolve(paths, audio_entry["words_json"])
+    if not os.path.exists(audio_wav):
+        raise FileNotFoundError(f"Missing audio clip: {audio_wav}")
+    audio_duration = cc.audio_duration_seconds(audio_wav)
+
+    # Visual stimulus mode: 'gabor' (default, fixation-locked) or 'video'.
+    vis = cfg["visual"]
+    visual_mode = vis.get("mode", "gabor")
+    video_file = cc.abspath(vis["video"]["file"])
+    if visual_mode == "video" and not os.path.exists(video_file):
+        raise FileNotFoundError(f"Missing video: {video_file}")
+
+    # Block length: 'audio' mode runs for the clip's duration (capped), else fixed.
+    block_cap = float(exp["block_seconds"])
+    block_target = (min(audio_duration, block_cap)
+                    if exp.get("block_mode", "audio") == "audio" else block_cap)
+
     # --- Select the precise PTB audio backend BEFORE importing sound --------
-    # The psychtoolbox ('ptb') backend gives low-latency, schedulable audio,
-    # which is what lets us align audio onset to an exact video frame flip.
     from psychopy import prefs
-    prefs.hardware["audioLib"] = ["ptb", "sounddevice", "pyo"]
+    prefs.hardware["audioLib"] = list(exp["audio_lib"])
 
     from psychopy import visual, core, event, logging, monitors
     from psychopy.sound import Sound
@@ -328,63 +101,79 @@ def run_experiment(subject: str,
     logging.console.setLevel(logging.WARNING)
 
     # --- Window -------------------------------------------------------------
-    # A named monitor keeps PsychoPy from warning about an unknown display.
     mon = monitors.Monitor("expMonitor")
-    win = visual.Window(
-        fullscr=FULLSCREEN,
-        color=BG_COLOR,
-        units="height",        # resolution-independent sizing
-        monitor=mon,
-        allowGUI=False,
-        winType="pyglet",
-    )
+    win = visual.Window(fullscr=bool(exp["fullscreen"]), color=exp["bg_color"],
+                        units="height", monitor=mon, allowGUI=False,
+                        winType="pyglet")
     win.mouseVisible = False
+    txt_color = exp["text_color"]
 
-    # --- Measure the true refresh rate for frame-accurate gap timing --------
-    # getActualFrameRate() returns None if it can't get a stable estimate.
+    # --- Frame-accurate gap: measure the true refresh rate ------------------
     measured = win.getActualFrameRate(nIdentical=10, nMaxFrames=120,
                                        nWarmUpFrames=10, threshold=1)
-    refresh_hz = measured if measured else FALLBACK_REFRESH
-    gap_frames = int(round(GAP_SECONDS * refresh_hz))
-    _log(f"Refresh rate ~{refresh_hz:.2f} Hz -> "
-         f"{gap_frames} frames for the {GAP_SECONDS:.3f} s gap.")
+    refresh_hz = measured if measured else float(exp["fallback_refresh_hz"])
+    gap_frames = int(round(float(exp["gap_seconds"]) * refresh_hz))
+    cc.log(f"Refresh ~{refresh_hz:.2f} Hz -> {gap_frames} frames for the "
+           f"{exp['gap_seconds']:.3f}s gap.")
 
     # --- Reusable visual components -----------------------------------------
-    instruction = visual.TextStim(win, text=INSTRUCTION_TEXT, color=TEXT_COLOR,
-                                  height=0.05, wrapWidth=1.4, alignText="center")
-    fixation = visual.TextStim(win, text="+", color=TEXT_COLOR, height=0.12)
-
-    # --- Pre-load the auditory stimulus into the audio buffer ---------------
-    # Building the Sound object now avoids first-play latency during the trial.
-    snd = Sound(speech_wav, stereo=True, hamming=False)
-
-    # --- Pre-load the (muted) movie -----------------------------------------
-    # MovieStim uses pixel units by default, so size=None renders at the video's
-    # native pixel size. The ffpyplayer backend always routes the movie's audio
-    # through sdl2 (it ignores noAudio), so volume=0.0 is what actually mutes the
-    # original soundtrack -- the spoken stimulus is our separate PTB Sound.
-    movie = visual.MovieStim(
+    instruction = visual.TextStim(
         win,
-        VIDEO_PATH,
-        noAudio=True,
-        volume=0.0,
-        loop=False,
-        size=None,
-    )
-    # Scale the on-screen video to VIDEO_SCALE x its native pixel size, keeping
-    # the aspect ratio. frameSize is the native (w, h) in pixels.
-    native_w, native_h = movie.frameSize
-    if not native_w or not native_h:          # safety fallback (tetris.mp4 = 640x360)
-        native_w, native_h = 640, 360
-    movie.size = (native_w * VIDEO_SCALE, native_h * VIDEO_SCALE)
-    _log(f"Video native {native_w}x{native_h}px -> displaying at "
-         f"{int(native_w * VIDEO_SCALE)}x{int(native_h * VIDEO_SCALE)}px "
-         f"(x{VIDEO_SCALE}, aspect preserved).")
+        text=("Decide your attentional focus:\n\n"
+              "Press the LEFT arrow for Audio,\n"
+              "or the RIGHT arrow for Visual."),
+        color=txt_color, height=0.05, wrapWidth=1.4, alignText="center")
+    fixation = visual.TextStim(win, text="+", color=txt_color, height=0.12)
+
+    # --- Pre-load audio (PTB) -----------------------------------------------
+    snd = Sound(audio_wav, stereo=True, hamming=False)
+
+    # --- Build the visual stimulus for the chosen mode ----------------------
+    movie = None
+    gabor = None
+    gabor_fix = None
+    switch_times: list[float] = []
+    if visual_mode == "video":
+        # Muted gameplay video, scaled to N x its native pixel size.
+        movie = visual.MovieStim(win, video_file, noAudio=True, volume=0.0,
+                                 loop=False, size=None)
+        native_w, native_h = movie.frameSize
+        if not native_w or not native_h:
+            native_w, native_h = 640, 360
+        scale = float(vis["video"].get("scale", 1.8))
+        movie.size = (native_w * scale, native_h * scale)
+        cc.log(f"Video native {native_w}x{native_h}px -> "
+               f"{int(native_w * scale)}x{int(native_h * scale)}px (x{scale}).")
+    else:
+        # Centred Gabor patch: a gaussian-masked sinusoidal grating. It rotates
+        # at a fixed speed and reverses direction at random scheduled times; the
+        # attend-visual task is to count those reversals. Staying at fixation
+        # avoids the eye-movement confound of a moving video.
+        g = vis["gabor"]
+        gsize = float(g.get("size", 0.16))
+        gabor = visual.GratingStim(
+            win, tex="sin", mask="gauss", units="height", pos=(0, 0),
+            size=gsize, sf=float(g.get("cycles", 6.0)) / gsize,
+            contrast=float(g.get("contrast", 1.0)), ori=0.0)
+        if g.get("show_fixation", True):
+            gabor_fix = visual.Circle(win, radius=0.004, units="height",
+                                      fillColor=txt_color, lineColor=txt_color,
+                                      pos=(0, 0))
+        switch_times = _gen_switch_times(
+            block_target, float(g.get("switch_min_interval_s", 1.2)),
+            float(g.get("switch_max_interval_s", 3.5)), rng)
+        cc.log(f"Gabor patch (size {gsize}h): {len(switch_times)} reversal(s) "
+               f"scheduled over {block_target:.1f}s.")
 
     global_clock = core.Clock()
 
+    # --- Optional webcam recording (separate process; see cma_webcam.py) -----
+    # Started here so the camera is warmed up before the timing-critical block.
+    webcam, webcam_info = _start_webcam(cfg, subject, block_index, win, visual,
+                                        core, txt_color)
+
     # ---------------------------------------------------------------
-    # FLOW STEP 1 -- Instruction screen, wait for LEFT / RIGHT
+    # STEP 1 — Instruction, wait for LEFT / RIGHT
     # ---------------------------------------------------------------
     instruction.draw()
     win.flip()
@@ -393,249 +182,431 @@ def run_experiment(subject: str,
     if "escape" in keys:
         _abort(win, core)
     choice_key = keys[0]
-    choice_label = "Audio" if choice_key == "left" else "Visual"
-    _log(f"Subject chose: {choice_key.upper()} ({choice_label})")
+    attended = "Audio" if choice_key == "left" else "Visual"
+    cc.log(f"Subject chose: {choice_key.upper()} -> attend {attended}")
 
     # ---------------------------------------------------------------
-    # FLOW STEP 2 -- The 1.0 s buffer gap (frame-counted = frame-accurate)
+    # STEP 2 — 1.0 s buffer gap (frame-counted = frame-accurate)
     # ---------------------------------------------------------------
     for _ in range(gap_frames):
         fixation.draw()
         win.flip()
-    # Keep the fixation on screen for the final frame's duration as well.
 
     # ---------------------------------------------------------------
-    # FLOW STEP 3 -- Synchronous audiovisual playback
+    # STEP 3 — Synchronous, capped audiovisual playback
     # ---------------------------------------------------------------
-    # We schedule the audio to begin at the exact moment of the next window
-    # flip (the flip that reveals the movie's first frame). PsychoPy exposes
-    # the predicted next-flip time in the PTB time-base specifically for this.
-    av_onset_global = None
-    onset_wall_clock = _dt.datetime.now().isoformat(timespec="milliseconds")
-
     try:
-        when_ptb = win.getFutureFlipTime(clock="ptb")  # next flip, ptb timebase
-        snd.play(when=when_ptb)                          # scheduled, sample-accurate
+        when_ptb = win.getFutureFlipTime(clock="ptb")   # next flip, ptb timebase
+        snd.play(when=when_ptb)                           # sample-accurate schedule
     except Exception as exc:
-        # If scheduling isn't supported, fall back to immediate play. The first
-        # video frame still appears on the same flip, so jitter stays sub-frame.
-        _log(f"Scheduled audio unavailable ({exc}); starting audio immediately.")
+        cc.log(f"Scheduled audio unavailable ({exc}); starting immediately.")
         snd.play()
 
-    movie.play()
-    block_clock = core.Clock()       # measures elapsed playback from AV onset
-    flip_t = win.flip()              # <- AV onset: first movie frame is shown here
-    block_clock.reset()              # t=0 is pinned to the onset flip
+    if movie is not None:
+        movie.play()
+    block_clock = core.Clock()
+    flip_t = win.flip()                                  # <- AV onset
+    block_clock.reset()
     av_onset_global = global_clock.getTime()
     onset_wall_clock = _dt.datetime.now().isoformat(timespec="milliseconds")
-    _log(f"AUDIOVISUAL ONSET at t={av_onset_global:.4f}s "
-         f"(win flip clock={flip_t:.4f}); capping block at {BLOCK_SECONDS:.1f}s.")
+    if webcam is not None:
+        # Wall-clock anchor for aligning webcam frames (in <name>.frames.csv) to
+        # the audiovisual onset.
+        webcam_info["av_onset_wallclock"] = time.time()
+    cc.log(f"AUDIOVISUAL ONSET at t={av_onset_global:.4f}s "
+           f"(audio {audio_duration:.1f}s, running {block_target:.1f}s).")
 
-    # --- Concurrent, capped draw loop ---------------------------------------
-    # The audio plays in the background; we keep pumping movie frames to the
-    # window. The loop ends at the FIRST of: the BLOCK_SECONDS cap, the video
-    # finishing, or an escape press. We stop on the first flip at/after the cap
-    # so the on-screen video and the audio are truncated together at ~30 s.
     aborted = False
-    while movie.status != FINISHED and block_clock.getTime() < BLOCK_SECONDS:
-        movie.draw()
-        win.flip()
-        if event.getKeys(keyList=["escape"]):
-            aborted = True
-            break
-
+    gabor_switches = 0          # reversals actually presented (ground truth)
+    if visual_mode == "video":
+        while movie.status != FINISHED and block_clock.getTime() < block_target:
+            movie.draw()
+            win.flip()
+            if event.getKeys(keyList=["escape"]):
+                aborted = True
+                break
+    else:
+        # Rotate the Gabor at a fixed speed, reversing direction at each scheduled
+        # switch time; count the reversals as they occur (the ground truth).
+        speed = float(vis["gabor"].get("rotation_speed_dps", 75.0))
+        direction = 1
+        sw_idx = 0
+        prev_t = 0.0
+        while block_clock.getTime() < block_target:
+            t = block_clock.getTime()
+            dt = t - prev_t
+            prev_t = t
+            while sw_idx < len(switch_times) and t >= switch_times[sw_idx]:
+                direction *= -1
+                gabor_switches += 1
+                sw_idx += 1
+            gabor.ori += direction * speed * dt      # time-based -> smooth
+            gabor.draw()
+            if gabor_fix is not None:
+                gabor_fix.draw()
+            win.flip()
+            if event.getKeys(keyList=["escape"]):
+                aborted = True
+                break
     block_duration = block_clock.getTime()
 
-    # --- Tidy up media: stop BOTH streams at the cap ------------------------
     try:
         snd.stop()
     except Exception:
         pass
-    try:
-        movie.stop()
-    except Exception:
-        pass
-    _log(f"Block ended at {block_duration:.3f}s "
-         f"({'aborted' if aborted else 'cap/finished'}).")
+    if movie is not None:
+        try:
+            movie.stop()
+        except Exception:
+            pass
+    cc.log(f"Block ended at {block_duration:.3f}s"
+           + (f"; {gabor_switches} reversals shown." if visual_mode == "gabor" else "."))
 
     # ---------------------------------------------------------------
-    # FLOW STEP 4 -- Data logging
+    # STEP 4 — Attention-check probe (about the ATTENDED stream)
     # ---------------------------------------------------------------
-    _write_trial_log(
-        subject=subject,
-        choice_key=choice_key,
-        choice_label=choice_label,
-        av_onset_global=av_onset_global,
-        onset_wall_clock=onset_wall_clock,
-        boundary_json=boundary_json,
-        speech_wav=speech_wav,
-        audio_duration=audio_duration,
-        refresh_hz=refresh_hz,
-        gap_frames=gap_frames,
-        block_seconds_cap=BLOCK_SECONDS,
-        block_duration_s=block_duration,
-        aborted=aborted,
-    )
+    probe_result = {"modality": attended, "probe_id": None, "question": None,
+                    "correct_answer": None, "response": None, "rt_s": None,
+                    "correct": None}
+    if not aborted:
+        if attended == "Audio":
+            probe_result = _probe_audio(win, event, core, cfg, audio_entry, rng,
+                                        txt_color)
+        elif visual_mode == "gabor":
+            # Count probe: scored against the reversals we actually presented.
+            probe_result = _probe_count(win, event, core, cfg, gabor_switches,
+                                        txt_color)
+        else:
+            probe_result = _probe_visual(win, event, core, cfg, rng, txt_color)
+        if probe_result.get("aborted"):
+            aborted = True
+
+    # --- Stop the webcam recorder (captures the block + the probe) -----------
+    if webcam is not None:
+        st = webcam.stop() or {}
+        webcam_info.update(opened=st.get("opened", webcam_info["opened"]),
+                           frames=st.get("frames"),
+                           duration_s=st.get("duration_s"))
+        cc.log(f"Webcam stopped: {st.get('frames')} frames, "
+               f"{st.get('duration_s')}s -> {webcam_info['file']}")
+
+    # ---------------------------------------------------------------
+    # STEP 5 — Behavioural logging
+    # ---------------------------------------------------------------
+    _write_behavior(paths, {
+        "subject": subject,
+        "block": block_index,
+        "timestamp": _dt.datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "attended_modality": attended,
+        "choice_key": choice_key,
+        "audio_stim_id": audio_entry["id"],
+        "audio_source": audio_entry.get("source"),
+        "speaker": audio_entry.get("speaker"),
+        "visual_mode": visual_mode,
+        "visual_stim": ("gabor" if visual_mode == "gabor"
+                        else os.path.relpath(video_file, cc.BASE_DIR)),
+        "gabor_switches": gabor_switches if visual_mode == "gabor" else None,
+        "word_boundary_file": os.path.relpath(words_file, cc.BASE_DIR),
+        "av_onset_global_s": round(av_onset_global, 4),
+        "av_onset_wall_clock": onset_wall_clock,
+        "audio_duration_s": round(audio_duration, 3),
+        "block_target_s": round(block_target, 3),
+        "block_duration_s": round(block_duration, 3),
+        "refresh_hz": round(refresh_hz, 3),
+        "gap_frames": gap_frames,
+        "probe_modality": probe_result["modality"],
+        "probe_id": probe_result["probe_id"],
+        "probe_question": probe_result["question"],
+        "probe_correct_answer": probe_result["correct_answer"],
+        "probe_response": probe_result["response"],
+        "probe_rt_s": probe_result["rt_s"],
+        "probe_correct": probe_result["correct"],
+        "probe_abs_error": probe_result.get("abs_error"),
+        "webcam_enabled": webcam_info["enabled"],
+        "webcam_file": webcam_info["file"],
+        "webcam_opened": webcam_info["opened"],
+        "webcam_frames": webcam_info["frames"],
+        "webcam_duration_s": webcam_info["duration_s"],
+        "webcam_start_wallclock": webcam_info["start_wallclock"],
+        "webcam_av_onset_wallclock": webcam_info["av_onset_wallclock"],
+        "aborted": aborted,
+    })
 
     # --- Goodbye ------------------------------------------------------------
-    bye = visual.TextStim(win, text="Block complete.\nThank you.",
-                          color=TEXT_COLOR, height=0.06)
-    bye.draw()
+    visual.TextStim(win, text="Block complete.\nThank you.",
+                    color=txt_color, height=0.06).draw()
     win.flip()
     core.wait(1.5)
     win.close()
     core.quit()
 
 
+# ===========================================================================
+# Probe presentation (yes/no)
+# ===========================================================================
+def _key_label(key: str) -> str:
+    return {"left": "←", "right": "→", "up": "↑",
+            "down": "↓"}.get(key, key.upper())
+
+
+def _run_yes_no(win, event, core, cfg, question: str, correct_present,
+                txt_color) -> dict:
+    """
+    Show a yes/no question and collect a response.
+
+    `correct_present` is True/False (whether the correct answer is "yes") or
+    None when ground truth is unavailable (then `correct` is logged as None).
+    """
+    from psychopy import visual
+    keys_cfg = cfg["probe"]["keys"]
+    yes_key, no_key = keys_cfg["yes"], keys_cfg["no"]
+    quit_key = cfg["probe"].get("quit_key", "escape")
+    header = cfg["probe"].get("instruction", "")
+
+    prompt = (f"{header}\n\n{question}\n\n"
+              f"YES ({_key_label(yes_key)})        NO ({_key_label(no_key)})")
+    visual.TextStim(win, text=prompt, color=txt_color, height=0.05,
+                    wrapWidth=1.5, alignText="center").draw()
+    win.flip()
+    event.clearEvents()
+    clock = core.Clock()
+    pressed = event.waitKeys(keyList=[yes_key, no_key, quit_key],
+                             timeStamped=clock)
+    key, rt = pressed[0]
+    if key == quit_key:
+        return {"response": None, "rt_s": None, "correct": None, "aborted": True}
+
+    response = "yes" if key == yes_key else "no"
+    correct = (None if correct_present is None
+               else (response == "yes") == bool(correct_present))
+    return {"response": response, "rt_s": round(rt, 4), "correct": correct,
+            "aborted": False}
+
+
+def _probe_audio(win, event, core, cfg, audio_entry, rng, txt_color) -> dict:
+    """Yes/no 'was WORD spoken?' probe for the attended-audio condition."""
+    probes = audio_entry.get("probes", [])
+    if not probes:
+        return {"modality": "Audio", "probe_id": None, "question": None,
+                "correct_answer": None, "response": None, "rt_s": None,
+                "correct": None}
+    p = rng.choice(probes)
+    res = _run_yes_no(win, event, core, cfg, p["question"], p["present"], txt_color)
+    return {"modality": "Audio", "probe_id": p["target_word"],
+            "question": p["question"],
+            "correct_answer": "yes" if p["present"] else "no",
+            "response": res["response"], "rt_s": res["rt_s"],
+            "correct": res["correct"], "aborted": res.get("aborted", False)}
+
+
+def _probe_visual(win, event, core, cfg, rng, txt_color) -> dict:
+    """Yes/no game question for the attended-visual VIDEO condition (config)."""
+    vprobes = cfg["visual"]["video"].get("probes", [])
+    usable = [p for p in vprobes if p.get("correct") in (True, False)]
+    if usable:
+        p = rng.choice(usable)
+        correct_present = bool(p["correct"])
+    elif vprobes:
+        # Ground truth not filled in config -> still ask, but log unscored.
+        p = vprobes[0]
+        correct_present = None
+        cc.log("WARNING: no video probe has 'correct' set in config; logging "
+               "the response UNSCORED. Fill visual.video.probes[].correct.")
+    else:
+        return {"modality": "Visual", "probe_id": None, "question": None,
+                "correct_answer": None, "response": None, "rt_s": None,
+                "correct": None}
+    res = _run_yes_no(win, event, core, cfg, p["question"], correct_present,
+                      txt_color)
+    ca = (None if correct_present is None else ("yes" if correct_present else "no"))
+    return {"modality": "Visual", "probe_id": p.get("id"),
+            "question": p["question"], "correct_answer": ca,
+            "response": res["response"], "rt_s": res["rt_s"],
+            "correct": res["correct"], "aborted": res.get("aborted", False)}
+
+
+# ===========================================================================
+# Gabor reversal schedule + count probe
+# ===========================================================================
+def _gen_switch_times(duration: float, min_iv: float, max_iv: float,
+                      rng: random.Random) -> list[float]:
+    """
+    Random reversal onset times (seconds from block onset) for the Gabor: draw
+    inter-reversal intervals uniformly from [min_iv, max_iv] until `duration`.
+    Reproducible given the runner's seed.
+    """
+    times: list[float] = []
+    t = rng.uniform(min_iv, max_iv)
+    while t < duration:
+        times.append(round(t, 4))
+        t += rng.uniform(min_iv, max_iv)
+    return times
+
+
+def _collect_number(win, event, core, cfg, prompt: str, txt_color):
+    """
+    Simple on-screen numeric entry (digits, backspace, ENTER to submit). Returns
+    (value_int_or_None, rt_seconds_or_None, aborted_bool).
+    """
+    from psychopy import visual
+    quit_key = cfg["probe"].get("quit_key", "escape")
+    digit_keys = [str(d) for d in range(10)] + [f"num_{d}" for d in range(10)]
+    accept = digit_keys + ["backspace", "return", "num_enter", quit_key]
+
+    entered = ""
+    event.clearEvents()
+    clock = core.Clock()
+    while True:
+        shown = entered if entered else "_"
+        visual.TextStim(
+            win, color=txt_color, height=0.05, wrapWidth=1.6, alignText="center",
+            text=f"{prompt}\n\nType the number, then press ENTER:\n\n{shown}"
+        ).draw()
+        win.flip()
+        key, rt = event.waitKeys(keyList=accept, timeStamped=clock)[0]
+        if key == quit_key:
+            return None, None, True
+        if key in ("return", "num_enter"):
+            if entered:
+                return int(entered), round(rt, 4), False
+        elif key == "backspace":
+            entered = entered[:-1]
+        else:
+            entered = (entered + key.replace("num_", ""))[:3]   # cap at 3 digits
+
+
+def _probe_count(win, event, core, cfg, true_count: int, txt_color) -> dict:
+    """Numeric 'how many reversals?' probe for the attended-Gabor condition."""
+    question = cfg["visual"]["gabor"].get(
+        "probe_question",
+        "How many times did the grating reverse its rotation direction?")
+    value, rt, aborted = _collect_number(win, event, core, cfg, question, txt_color)
+    correct = None if value is None else (value == true_count)
+    abs_err = None if value is None else abs(value - true_count)
+    return {"modality": "Visual", "probe_id": "gabor_switch_count",
+            "question": question, "correct_answer": str(true_count),
+            "response": (None if value is None else str(value)),
+            "rt_s": rt, "correct": correct, "abs_error": abs_err,
+            "aborted": aborted}
+
+
+# ===========================================================================
+# Webcam
+# ===========================================================================
+def _start_webcam(cfg, subject, block_index, win, visual, core, txt_color):
+    """
+    Start the webcam recorder subprocess if `webcam.enabled`. Returns a tuple
+    (controller_or_None, info_dict). The recorder runs in its own process, so
+    it never touches this process's draw-loop timing.
+    """
+    wcfg = cfg.get("webcam", {}) or {}
+    info = {"enabled": bool(wcfg.get("enabled")), "file": None, "opened": False,
+            "frames": None, "duration_s": None, "start_wallclock": None,
+            "av_onset_wallclock": None}
+    if not wcfg.get("enabled"):
+        return None, info
+
+    from cma_webcam import WebcamController
+    wdir = cc.abspath(wcfg.get("dir", "webcam"))
+    os.makedirs(wdir, exist_ok=True)
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(wdir, f"{subject}_{ts}_b{block_index}."
+                                  f"{wcfg.get('container', 'mp4')}")
+    res = wcfg.get("resolution") or None
+    ctrl = WebcamController(
+        out_path,
+        device=int(wcfg.get("device", 0)),
+        fps=float(wcfg.get("fps", 0) or 0),
+        resolution=tuple(res) if res else None,
+        fourcc=wcfg.get("fourcc", "mp4v"),
+        max_seconds=float(wcfg.get("max_seconds", 600)),
+    )
+    info["file"] = os.path.relpath(out_path, cc.BASE_DIR)
+
+    # Brief on-screen note while the camera warms up (can take ~1-2 s).
+    visual.TextStim(win, text="Preparing camera…", color=txt_color,
+                    height=0.05).draw()
+    win.flip()
+
+    opened = ctrl.start()
+    info["opened"] = opened
+    info["start_wallclock"] = ctrl.start_wallclock
+    if opened:
+        cc.log(f"Webcam recording -> {out_path}")
+        return ctrl, info
+
+    # Failed to open: abort if required, otherwise carry on without recording.
+    st = ctrl.read_status() or {}
+    msg = st.get("error", "camera did not open in time")
+    ctrl.stop()
+    if wcfg.get("required"):
+        win.close()
+        core.quit()
+        raise RuntimeError(f"Webcam is required but failed to start: {msg}")
+    cc.log(f"WARNING: webcam not recording ({msg}); continuing without it.")
+    return None, info
+
+
+# ===========================================================================
+# Behaviour logging + helpers
+# ===========================================================================
+def _write_behavior(paths: cc.Paths, record: dict) -> None:
+    """Append a row to behavior/<subject>.csv and drop a per-block JSON."""
+    os.makedirs(paths.behavior_dir, exist_ok=True)
+    subject = record["subject"]
+    ts = record["timestamp"]
+
+    json_path = os.path.join(paths.behavior_dir, f"{subject}_{ts}_b{record['block']}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, ensure_ascii=False)
+
+    csv_path = os.path.join(paths.behavior_dir, f"{subject}.csv")
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(record.keys()))
+        if write_header:
+            w.writeheader()
+        w.writerow(record)
+
+    acc = record["probe_correct"]
+    acc_s = "n/a" if acc is None else ("CORRECT" if acc else "incorrect")
+    cc.log(f"Behaviour logged ({acc_s}) -> {csv_path}")
+    cc.log(f"                        -> {json_path}")
+
+
 def _abort(win, core):
-    """Clean shutdown on escape during instructions."""
-    _log("Aborted by user.")
+    cc.log("Aborted by user.")
     win.close()
     core.quit()
     sys.exit(0)
 
 
-def _write_trial_log(**row) -> None:
-    """
-    Append a single-row trial record to data/<subject>_block.csv and also drop a
-    standalone JSON for this run. Captures the four required fields plus context.
-    """
-    os.makedirs(DATA_DIR, exist_ok=True)
-    subject = row["subject"]
-    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    record = {
-        "subject": subject,
-        "timestamp": ts,
-        # --- the four explicitly-required fields ---
-        "choice_key": row["choice_key"],                 # 'left' / 'right'
-        "choice_label": row["choice_label"],             # 'Audio' / 'Visual'
-        "av_onset_global_s": round(row["av_onset_global"], 4)
-        if row["av_onset_global"] is not None else None,
-        "av_onset_wall_clock": row["onset_wall_clock"],
-        "word_boundary_file": os.path.relpath(row["boundary_json"], BASE_DIR),
-        # --- helpful context ---
-        "video_file": os.path.relpath(VIDEO_PATH, BASE_DIR),
-        "audio_file": os.path.relpath(row["speech_wav"], BASE_DIR),
-        "audio_duration_s": round(row["audio_duration"], 3),
-        "refresh_hz": round(row["refresh_hz"], 3),
-        "gap_frames": row["gap_frames"],
-        "gap_seconds_target": GAP_SECONDS,
-        "block_seconds_cap": row["block_seconds_cap"],
-        "block_duration_s": round(row["block_duration_s"], 3),
-        "aborted": row["aborted"],
-    }
-
-    # Per-run JSON.
-    json_path = os.path.join(DATA_DIR, f"{subject}_{ts}.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(record, f, indent=2, ensure_ascii=False)
-
-    # Cumulative CSV (one row per block).
-    csv_path = os.path.join(DATA_DIR, f"{subject}_block.csv")
-    write_header = not os.path.exists(csv_path)
-    with open(csv_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(record.keys()))
-        if write_header:
-            writer.writeheader()
-        writer.writerow(record)
-
-    _log(f"Trial logged -> {csv_path}")
-    _log(f"             -> {json_path}")
-
-
 # ===========================================================================
-# ORCHESTRATION
+# Orchestration
 # ===========================================================================
-def preprocess() -> float:
-    """
-    Run the two preprocessing stages (audio synthesis + forced alignment) that
-    must complete BEFORE the PsychoPy window opens. Returns audio duration (s).
-    """
-    print("=" * 70)
-    print("PRE-FLIGHT: building the missing auditory asset locally")
-    print("=" * 70)
-
-    if not os.path.exists(VIDEO_PATH):
-        raise FileNotFoundError(f"Visual stimulus not found: {VIDEO_PATH}")
-
-    # Stage 1: synthesise speech -> WAV.
-    audio_duration = generate_speech_audio(SPEECH_TEXT, SPEECH_WAV,
-                                           engine=TTS_ENGINE)
-
-    # Stage 2: local Whisper forced alignment -> word boundaries.
-    extract_word_boundaries(SPEECH_WAV, BOUNDARY_JSON, BOUNDARY_CSV,
-                            model_size=WHISPER_MODEL)
-
-    print("=" * 70)
-    print("PRE-FLIGHT COMPLETE. Opening PsychoPy window next...")
-    print("=" * 70)
-    return audio_duration
-
-
-def _audio_duration_seconds(wav_path: str) -> float:
-    """Read a WAV's duration WITHOUT importing the PyAV/Whisper stack."""
-    import soundfile as sf
-    info = sf.info(wav_path)
-    return info.frames / float(info.samplerate)
-
-
-def _run_preprocess_in_subprocess() -> None:
-    """
-    Run Stage 1 + Stage 2 in a SEPARATE Python process, then return.
-
-    Why isolate: faster-whisper imports PyAV ('av'), which bundles libavdevice
-    v62, while PsychoPy's MovieStim imports ffpyplayer, which bundles libavdevice
-    v60. If both libraries are resident in the SAME process, macOS reports
-    duplicate Obj-C class registration (AVFFrameReceiver / AVFAudioReceiver),
-    which "may cause spurious casting failures and mysterious crashes."
-
-    Doing preprocessing in a short-lived child process guarantees that the
-    long-lived experiment process (this one) never loads PyAV at all -- so only
-    ffpyplayer's libavdevice is ever present during playback.
-    """
-    import subprocess
-    cmd = [sys.executable, os.path.abspath(__file__), "--preprocess-only"]
-    _log(f"Launching isolated preprocessing subprocess (avoids PyAV/ffpyplayer "
-         f"libavdevice clash):\n    {' '.join(cmd)}")
-    # Inherit stdout/stderr so the user sees the Stage 1/2 progress live.
-    subprocess.run(cmd, check=True)
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cross-modal attention block.")
-    parser.add_argument("--subject", default="sub01",
-                        help="Subject/participant identifier (default: sub01).")
-    parser.add_argument("--skip-preprocess", action="store_true",
-                        help="Reuse existing generated audio + boundaries.")
-    parser.add_argument("--preprocess-only", action="store_true",
-                        help="Run only Stage 1+2 (audio + word boundaries) then "
-                             "exit. Used internally to isolate PyAV from "
-                             "ffpyplayer; can also be run by hand.")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Run one cross-modal attention block.")
+    ap.add_argument("--subject", default="sub01", help="Participant id.")
+    ap.add_argument("--config", default=cc.DEFAULT_CONFIG)
+    ap.add_argument("--block", type=int, default=1, help="Block index (logging).")
+    ap.add_argument("--audio-id", default=None,
+                    help="Use a specific audio clip id (default: random).")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Seed for stimulus/probe randomisation.")
+    args = ap.parse_args()
 
-    # Internal/standalone entry point: the isolated preprocessing child runs
-    # here, never touching PsychoPy/ffpyplayer.
-    if args.preprocess_only:
-        preprocess()
-        return
+    cfg = cc.load_config(args.config)
+    paths = cc.Paths.from_config(cfg).ensure()
+    manifest = cc.read_manifest(paths.manifest)
 
-    # --- Preprocessing (loud, before any graphics) --------------------------
-    have_assets = os.path.exists(SPEECH_WAV) and os.path.exists(BOUNDARY_JSON)
-    if args.skip_preprocess and have_assets:
-        _log("Skipping preprocessing; reusing existing assets.")
-    else:
-        # Build the missing auditory asset in an isolated child process.
-        _run_preprocess_in_subprocess()
-    audio_duration = _audio_duration_seconds(SPEECH_WAV)
+    seed = args.seed if args.seed is not None else _dt.datetime.now().microsecond
+    rng = random.Random(seed)
 
-    # --- Run the block (this process has NOT imported PyAV) -----------------
-    run_experiment(
-        subject=args.subject,
-        speech_wav=SPEECH_WAV,
-        boundary_json=BOUNDARY_JSON,
-        audio_duration=audio_duration,
-    )
+    audio_entry = select_audio_stim(manifest, rng, args.audio_id)
+    cc.log(f"Selected audio stimulus: {audio_entry['id']} "
+           f"({audio_entry['duration_s']:.1f}s, speaker {audio_entry.get('speaker')}).")
+
+    run_experiment(cfg, paths, audio_entry, args.subject, args.block, rng)
 
 
 if __name__ == "__main__":

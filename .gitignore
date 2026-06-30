@@ -222,3 +222,13 @@ __marimo__/
 #  per-subject experiment output). These should not be version-controlled.
 generated/
 data/
+
+# Prepared stimulus library + subject behaviour (re-buildable / per-subject)
+stims/
+behavior/
+
+# Webcam recordings (per-subject media)
+webcam/
+
+# macOS
+.DS_Store

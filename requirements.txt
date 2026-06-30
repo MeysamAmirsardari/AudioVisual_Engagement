@@ -14,13 +14,21 @@ scipy<1.15
 psychopy            # window, timing, event handling
 psychtoolbox        # 'ptb' low-latency, schedulable audio backend (AV sync)
 ffpyplayer          # MovieStim backend (bundles its own ffmpeg libs)
+opencv-python       # webcam capture + encoding (cma_webcam.py, separate process)
 #
 # --- Audio synthesis (Stage 1) --------------------------------------------
 gTTS                # online TTS (default); natural prosody
 pyttsx3             # offline macOS system-voice fallback
 #
-# --- Forced alignment / word boundaries (Stage 2) -------------------------
-faster-whisper      # local Whisper; bundles PyAV so NO system ffmpeg needed
+# --- Stimulus library: LibriSpeech + word onsets (build_stimuli.py) -------
+datasets            # stream gilkeyio/librispeech-alignments (audio + MFA onsets)
+PyYAML              # config.yaml parsing (also pulled in by psychopy)
+# NOTE: we intentionally do NOT install torchcodec. datasets>=5 wants it to
+# DECODE audio, but we stream with Audio(decode=False) and decode the raw bytes
+# with soundfile instead -- avoiding a heavy torch dependency.
+#
+# --- Forced alignment / word boundaries (TTS fallback source only) --------
+faster-whisper      # local Whisper; only used when build.source == tts
 #
 # --- Audio I/O / decoding --------------------------------------------------
 soundfile           # libsndfile >= 1.1 decodes MP3/AIFF/WAV without ffmpeg

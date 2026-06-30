@@ -94,6 +94,8 @@ WHISPER_COMPUTE = "int8"
 FULLSCREEN = True
 BG_COLOR = "black"
 TEXT_COLOR = "white"
+VIDEO_SCALE = 1.8          # Display the video at this multiple of its native
+                           # pixel size (aspect ratio preserved). 1.0 = native.
 GAP_SECONDS = 1.0          # The "buffer gap" duration (frame-counted).
 BLOCK_SECONDS = 30.0       # Hard cap on audiovisual playback: BOTH the video
                            # and the audio are stopped at exactly this point,
@@ -229,6 +231,14 @@ def extract_word_boundaries(wav_path: str,
                          compute_type=WHISPER_COMPUTE)
 
     _log("Transcribing with word-level timestamps...")
+    # faster-whisper's mel filterbank does `mel_filters @ magnitudes`, which on
+    # numpy 2.x emits spurious SIMD floating-point warnings (divide-by-zero /
+    # overflow / invalid) from padding lanes. The transcription result is
+    # unaffected, so silence just that specific source of noise.
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning,
+                            module=r"faster_whisper\.feature_extractor")
+
     # word_timestamps=True asks Whisper for per-word start/end via its
     # cross-attention alignment. We pin the language to English for stability.
     segments, info = model.transcribe(
@@ -349,16 +359,27 @@ def run_experiment(subject: str,
     snd = Sound(speech_wav, stereo=True, hamming=False)
 
     # --- Pre-load the (muted) movie -----------------------------------------
-    # noAudio=True strips the original soundtrack; volume=0 is belt-and-braces.
+    # MovieStim uses pixel units by default, so size=None renders at the video's
+    # native pixel size. The ffpyplayer backend always routes the movie's audio
+    # through sdl2 (it ignores noAudio), so volume=0.0 is what actually mutes the
+    # original soundtrack -- the spoken stimulus is our separate PTB Sound.
     movie = visual.MovieStim(
         win,
         VIDEO_PATH,
         noAudio=True,
         volume=0.0,
         loop=False,
-        # Scale to fit the height-based canvas while preserving aspect ratio.
         size=None,
     )
+    # Scale the on-screen video to VIDEO_SCALE x its native pixel size, keeping
+    # the aspect ratio. frameSize is the native (w, h) in pixels.
+    native_w, native_h = movie.frameSize
+    if not native_w or not native_h:          # safety fallback (tetris.mp4 = 640x360)
+        native_w, native_h = 640, 360
+    movie.size = (native_w * VIDEO_SCALE, native_h * VIDEO_SCALE)
+    _log(f"Video native {native_w}x{native_h}px -> displaying at "
+         f"{int(native_w * VIDEO_SCALE)}x{int(native_h * VIDEO_SCALE)}px "
+         f"(x{VIDEO_SCALE}, aspect preserved).")
 
     global_clock = core.Clock()
 
@@ -552,26 +573,63 @@ def preprocess() -> float:
     return audio_duration
 
 
+def _audio_duration_seconds(wav_path: str) -> float:
+    """Read a WAV's duration WITHOUT importing the PyAV/Whisper stack."""
+    import soundfile as sf
+    info = sf.info(wav_path)
+    return info.frames / float(info.samplerate)
+
+
+def _run_preprocess_in_subprocess() -> None:
+    """
+    Run Stage 1 + Stage 2 in a SEPARATE Python process, then return.
+
+    Why isolate: faster-whisper imports PyAV ('av'), which bundles libavdevice
+    v62, while PsychoPy's MovieStim imports ffpyplayer, which bundles libavdevice
+    v60. If both libraries are resident in the SAME process, macOS reports
+    duplicate Obj-C class registration (AVFFrameReceiver / AVFAudioReceiver),
+    which "may cause spurious casting failures and mysterious crashes."
+
+    Doing preprocessing in a short-lived child process guarantees that the
+    long-lived experiment process (this one) never loads PyAV at all -- so only
+    ffpyplayer's libavdevice is ever present during playback.
+    """
+    import subprocess
+    cmd = [sys.executable, os.path.abspath(__file__), "--preprocess-only"]
+    _log(f"Launching isolated preprocessing subprocess (avoids PyAV/ffpyplayer "
+         f"libavdevice clash):\n    {' '.join(cmd)}")
+    # Inherit stdout/stderr so the user sees the Stage 1/2 progress live.
+    subprocess.run(cmd, check=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cross-modal attention block.")
     parser.add_argument("--subject", default="sub01",
                         help="Subject/participant identifier (default: sub01).")
     parser.add_argument("--skip-preprocess", action="store_true",
                         help="Reuse existing generated audio + boundaries.")
+    parser.add_argument("--preprocess-only", action="store_true",
+                        help="Run only Stage 1+2 (audio + word boundaries) then "
+                             "exit. Used internally to isolate PyAV from "
+                             "ffpyplayer; can also be run by hand.")
     args = parser.parse_args()
 
-    # --- Preprocessing (loud, before any graphics) --------------------------
-    if args.skip_preprocess and os.path.exists(SPEECH_WAV) \
-            and os.path.exists(BOUNDARY_JSON):
-        _log("Skipping preprocessing; reusing existing assets.")
-        # Recover duration from the existing WAV.
-        import soundfile as sf
-        info = sf.info(SPEECH_WAV)
-        audio_duration = info.frames / float(info.samplerate)
-    else:
-        audio_duration = preprocess()
+    # Internal/standalone entry point: the isolated preprocessing child runs
+    # here, never touching PsychoPy/ffpyplayer.
+    if args.preprocess_only:
+        preprocess()
+        return
 
-    # --- Run the block ------------------------------------------------------
+    # --- Preprocessing (loud, before any graphics) --------------------------
+    have_assets = os.path.exists(SPEECH_WAV) and os.path.exists(BOUNDARY_JSON)
+    if args.skip_preprocess and have_assets:
+        _log("Skipping preprocessing; reusing existing assets.")
+    else:
+        # Build the missing auditory asset in an isolated child process.
+        _run_preprocess_in_subprocess()
+    audio_duration = _audio_duration_seconds(SPEECH_WAV)
+
+    # --- Run the block (this process has NOT imported PyAV) -----------------
     run_experiment(
         subject=args.subject,
         speech_wav=SPEECH_WAV,

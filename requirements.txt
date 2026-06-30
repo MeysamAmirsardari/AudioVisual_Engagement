@@ -1,0 +1,28 @@
+# Cross-modal attention block -- Python 3.11 (matches the existing .venv).
+# Install with:  python -m pip install -r requirements.txt
+#
+# NOTE: install in ONE pip invocation (as below). Do NOT run two pip processes
+# in parallel into the same venv -- concurrent writes can corrupt shared deps
+# (we hit exactly this with scipy). A frozen, known-good snapshot of the fully
+# resolved environment is in requirements.lock.txt.
+#
+# scipy is pinned <1.15 because PsychoPy 2026.x requires it; this version still
+# satisfies librosa/numba and works on numpy 2.x.
+scipy<1.15
+#
+# --- Experiment runtime ----------------------------------------------------
+psychopy            # window, timing, event handling
+psychtoolbox        # 'ptb' low-latency, schedulable audio backend (AV sync)
+ffpyplayer          # MovieStim backend (bundles its own ffmpeg libs)
+#
+# --- Audio synthesis (Stage 1) --------------------------------------------
+gTTS                # online TTS (default); natural prosody
+pyttsx3             # offline macOS system-voice fallback
+#
+# --- Forced alignment / word boundaries (Stage 2) -------------------------
+faster-whisper      # local Whisper; bundles PyAV so NO system ffmpeg needed
+#
+# --- Audio I/O / decoding --------------------------------------------------
+soundfile           # libsndfile >= 1.1 decodes MP3/AIFF/WAV without ffmpeg
+librosa             # decode fallback only
+numpy

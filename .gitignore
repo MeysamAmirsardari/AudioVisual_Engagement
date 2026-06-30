@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Cross-modal attention experiment: runtime-generated artifacts
+# (synthesized speech + word boundaries are rebuilt on each run; data/ holds
+#  per-subject experiment output). These should not be version-controlled.
+generated/
+data/

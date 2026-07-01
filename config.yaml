@@ -25,17 +25,18 @@ paths:
 # ---------------------------------------------------------------------------
 build:
   source: librispeech             # librispeech | tts
-  n_clips: 10                     # number of audio stimuli to prepare
+  n_clips: 60                     # number of audio stimuli to prepare (1 / trial)
   target_duration_s: 28.0         # concatenate utterances up to ~this length
   max_duration_s: 32.0            # never exceed this per prepared clip
   seed: 1234                      # reproducible selection
 
   librispeech:
     dataset: gilkeyio/librispeech-alignments   # audio + MFA word onsets (CC-BY-4.0)
-    split: dev_clean              # dev_clean | dev_other | test_clean | test_other
+    split: train_clean_100        # 251 speakers -> enough for 60 distinct-speaker
+                                  # clips (dev_clean/test_* have only ~40 speakers)
     same_speaker_per_clip: true   # concatenate utterances from a single speaker
     inter_utterance_gap_s: 0.30   # silence inserted between concatenated utts
-    scan_limit: 4000              # max rows to stream while searching for clips
+    scan_limit: 12000             # max rows to stream while searching for clips
 
   tts:                            # only used when build.source == tts
     engine: gtts                  # gtts (online) | pyttsx3 (offline, macOS voice)

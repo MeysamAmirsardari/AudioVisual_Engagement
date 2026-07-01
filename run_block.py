@@ -126,6 +126,56 @@ def _sample_offset(ranges: list, rng: random.Random) -> float:
     return ranges[-1][1]
 
 
+def _make_trigger(win, visual, cfg):
+    """
+    Build the photodiode trigger square, or None if disabled.
+
+    Positioned in HEIGHT units using only the aspect RATIO, so it is robust to
+    Retina/HiDPI displays (where win.size in pixels and the pixel coordinate
+    system don't match, which pushes a pix-unit corner square off-screen).
+    Height units are isotropic, so equal width/height is a true square.
+    """
+    tcfg = cfg.get("trigger", {}) or {}
+    if not tcfg.get("enabled"):
+        return None
+    aspect = float(win.size[0]) / float(win.size[1])       # ratio -> Retina-safe
+    side = (float(tcfg["size_h"]) if tcfg.get("size_h") is not None
+            else float(tcfg.get("size_px", 100)) / float(win.size[1]))
+    half = side / 2.0
+    xr, xl = aspect / 2.0 - half, -aspect / 2.0 + half
+    yt, yb = 0.5 - half, -0.5 + half
+    pos = {"bottom-right": (xr, yb), "bottom-left": (xl, yb),
+           "top-right": (xr, yt), "top-left": (xl, yt)}.get(
+               tcfg.get("corner", "bottom-right"), (xr, yb))
+    return visual.Rect(win, width=side, height=side, units="height", pos=pos,
+                       fillColor=tcfg.get("color", "white"),
+                       lineColor=tcfg.get("color", "white"))
+
+
+def _test_trigger(cfg: dict) -> None:
+    """Open the window and blink ONLY the trigger square, to check placement."""
+    from psychopy import visual, core, event, monitors
+    exp = cfg["experiment"]
+    win = visual.Window(fullscr=bool(exp["fullscreen"]), color=exp["bg_color"],
+                        units="height", monitor=monitors.Monitor("expMonitor"),
+                        allowGUI=False, winType="pyglet")
+    win.mouseVisible = False
+    trig = _make_trigger(win, visual, cfg)
+    info = visual.TextStim(
+        win, color=exp["text_color"], height=0.04, wrapWidth=1.4,
+        text=("Trigger test — a white square should blink in the "
+              f"{cfg.get('trigger', {}).get('corner', 'bottom-right')} corner.\n"
+              f"win.size = {tuple(win.size)}\n\nPress any key to exit."))
+    clock = core.Clock()
+    while not event.getKeys():
+        info.draw()
+        if trig is not None and int(clock.getTime() * 2) % 2 == 0:   # ~1 Hz blink
+            trig.draw()
+        win.flip()
+    win.close()
+    core.quit()
+
+
 # ===========================================================================
 # Session
 # ===========================================================================
@@ -196,20 +246,10 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                               pos=(0, -0.42))
 
     # --- Photodiode trigger square (shown for the whole gap) ----------------
-    trigger = None
-    tcfg = cfg.get("trigger", {}) or {}
-    if tcfg.get("enabled"):
-        size_px = float(tcfg.get("size_px", 100))
-        ww, wh = win.size
-        sx, sy = ww / 2.0 - size_px / 2.0, wh / 2.0 - size_px / 2.0
-        corner = tcfg.get("corner", "bottom-right")
-        pos = {"bottom-right": (sx, -sy), "bottom-left": (-sx, -sy),
-               "top-right": (sx, sy), "top-left": (-sx, sy)}.get(corner, (sx, -sy))
-        trigger = visual.Rect(win, width=size_px, height=size_px, units="pix",
-                              pos=pos, fillColor=tcfg.get("color", "white"),
-                              lineColor=tcfg.get("color", "white"))
-        cc.log(f"Trigger square {int(size_px)}px at {corner}; on during the gap "
-               f"(rising edge = gap onset, falling edge = AV onset).")
+    trigger = _make_trigger(win, visual, cfg)
+    if trigger is not None:
+        cc.log(f"Trigger square at {cfg['trigger'].get('corner', 'bottom-right')}"
+               f"; on during the gap (rising edge = gap onset, falling = AV onset).")
 
     # --- Load the movie ONCE (video mode); each trial seeks a random cut -----
     movie = None
@@ -742,9 +782,15 @@ def main() -> None:
                     help="Override experiment.n_trials.")
     ap.add_argument("--seed", type=int, default=None,
                     help="Seed for stimulus/probe/cut randomisation.")
+    ap.add_argument("--test-trigger", action="store_true",
+                    help="Blink only the photodiode square to check placement, "
+                         "then exit (no trials).")
     args = ap.parse_args()
 
     cfg = cc.load_config(args.config)
+    if args.test_trigger:
+        _test_trigger(cfg)
+        return
     if args.trials is not None:
         cfg["experiment"]["n_trials"] = args.trials
     paths = cc.Paths.from_config(cfg).ensure()

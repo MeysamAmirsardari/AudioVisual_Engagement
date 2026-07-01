@@ -87,10 +87,11 @@ class TetrisGame:
         self._bag: list[str] = []
 
         # Event counters exposed for the attention probe.
-        self.line_clear_events = 0     # number of clear MOMENTS (countable task)
+        self.line_clear_events = 0     # number of clear MOMENTS
         self.rows_cleared = 0          # total rows removed
         self.pieces_placed = 0
         self.resets = 0                # board top-outs (should be ~0 with the AI)
+        self.max_stack_height = 0      # peak stack height in rows (the probe answer)
 
         # Timing / animation state.
         self._tick_accum = 0.0
@@ -221,10 +222,19 @@ class TetrisGame:
         else:
             self._lock()
 
+    def stack_height(self) -> int:
+        """Current stack height in rows (0 = empty board)."""
+        for r in range(self.rows):
+            if self.board[r].any():
+                return self.rows - r
+        return 0
+
     def _lock(self):
         for r, c in self._cells(self.rot, self.r_off, self.c_off):
             self.board[r, c] = 1
         self.pieces_placed += 1
+        # Peak stack height is captured right after locking, before any clear.
+        self.max_stack_height = max(self.max_stack_height, self.stack_height())
         full = [r for r in range(self.rows) if self.board[r].all()]
         if full:
             self._clearing = full
@@ -303,6 +313,7 @@ if __name__ == "__main__":
                 print("frame save skipped:", exc)
     print(f"seed={args.seed} {args.seconds}s @ {args.fps}fps:")
     print(f"  pieces placed     : {g.pieces_placed}")
-    print(f"  line-clear events : {g.line_clear_events}  (the countable task)")
+    print(f"  line-clear events : {g.line_clear_events}")
     print(f"  rows cleared      : {g.rows_cleared}")
-    print(f"  board resets       : {g.resets}")
+    print(f"  max stack height  : {g.max_stack_height}  (the probe answer)")
+    print(f"  board resets      : {g.resets}")

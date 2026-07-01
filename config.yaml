@@ -13,6 +13,7 @@ paths:
   stim_dir: stims                 # prepared/downloaded stimuli live here
   audio_subdir: audio             # -> stims/audio/<id>.wav + <id>.words.json/csv
   behavior_dir: behavior          # per-subject behavioural logs
+  games_dir: games                # per-trial Tetris reconstruction records (-> mp4)
   manifest: stims/manifest.json   # index of every prepared stimulus
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,11 @@ experiment:
   audio_lib: [ptb, sounddevice, pyo]   # PTB first for schedulable, low-latency audio
   fallback_refresh_hz: 60.0            # used only if the refresh rate can't be measured
 
+  # FIXED master seed -> the whole session is reproducible (audio assignment,
+  # focus order, delay jitter, and every Tetris game). Recorded in every log.
+  # Override for a specific run with `--seed`. Keep constant for a fixed design.
+  seed: 20240601
+
   n_trials: 60                    # trials run back-to-back in one session
   inter_trial_interval_s: 0.8     # blank fixation between trials
   gap_seconds: 2.0                # BASE fixation delay before each block (this is
@@ -70,9 +76,9 @@ experiment:
   #   manual           = the subject chooses each trial (LEFT=Audio/RIGHT=Visual).
   focus_mode: auto
   cue_seconds: 1.5                # auto-mode cue length WHEN start_on_space is false
-  start_on_space: true            # true  = the instruction/cue waits for SPACE, so
-                                  #         the subject starts each trial when ready
-                                  # false = auto-advance after cue_seconds
+  start_on_space: false           # false = the cue auto-advances after cue_seconds
+                                  #         (no key press needed to start a trial)
+                                  # true  = the cue waits for SPACE (self-paced)
 
 # ---------------------------------------------------------------------------
 # Attention-check probe (shown after the block). Format: yes / no.
@@ -114,13 +120,15 @@ visual:
     rows: 20                      # board height in cells
     board_height: 0.5             # on-screen board height (height units); width
                                   # follows from cols/rows (compact + centred)
-    tick_interval_s: 0.045        # game speed (time per move/gravity step)
-    flash_s: 0.18                 # how long cleared rows flash (the counted event)
+    speed_s_per_step: 0.045       # GAME SPEED: seconds per move/gravity step
+                                  # (smaller = faster). ~0.045 -> ~1 piece/second.
+    flash_s: 0.18                 # how long cleared rows flash before disappearing
+    render_cell_px: 14            # pixels per cell (on-screen texture + mp4 size)
     show_fixation: true           # central fixation dot (maintain fixation)
     flip_vertical: true           # PsychoPy shows numpy row 0 at the bottom; keep
                                   # true so the stack renders at the bottom
-    seed_base: 0                  # combined with trial index -> per-trial seed
-    probe_question: "How many times did rows flash and clear?"
+    seed_base: 0                  # combined with the master seed + trial index
+    probe_question: "What was the GREATEST height the stack reached (number of rows)?"
 
   gabor:
     size: 0.26                    # patch diameter in height units (kept small)

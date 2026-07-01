@@ -95,13 +95,22 @@ audiovisual onset** — for hardware-precise EEG timing. Size/corner configurabl
 ## Visual stimulus (`visual.mode`)
 
 - **`tetris` (default)** — a **self-playing, black-and-white Tetris** (in
-  `tetris/`), watched passively. Deterministic (seeded per trial), grayscale
-  (no colour confound), compact and **centred with a fixation dot** to limit eye
-  movements. Cleared rows briefly **flash**; attend-visual is to **count those
-  flashes**, scored automatically against the known count (`tetris_clears`). No
-  recorded video, no non-game sections, no random-cut machinery. Tune board
-  size/speed under `visual.tetris`. (Preview: `python tetris/tetris_game.py
-  --save-frames 6` writes frames to `/tmp`.)
+  `tetris/`), watched passively. Deterministic (seeded), grayscale (no colour
+  confound), compact and **centred with a fixation dot** to limit eye movements.
+  The attend-visual task is to report the **greatest height the stack reached**
+  (`tetris_max_height`), scored automatically. Speed is `visual.tetris.speed_s_per_step`.
+  (Preview: `python tetris/tetris_game.py --save-frames 6` writes frames to `/tmp`.)
+  Every Tetris trial is saved to `games/` as a reconstruction record (seed +
+  params + block duration + exact display frame times); because the game is
+  deterministic these render to faithful MP4s **after** the session:
+
+  ```bash
+  python reconstruct_tetris.py                 # all trials -> games/mp4/*.mp4
+  python reconstruct_tetris.py --exact         # frame-exact (uses recorded times)
+  ```
+
+  Reproducibility: the master seed is fixed in `experiment.seed` (constant across
+  runs), and the full config is embedded in each session JSON.
 - **`gabor`** — a small, centred Gabor patch that rotates and randomly **reverses
   direction**; attend-visual counts the reversals (numeric probe, auto-scored).
 - **`video`** — the pre-recorded `tetris.mp4` with random cuts from the

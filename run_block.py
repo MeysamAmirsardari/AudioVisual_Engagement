@@ -301,7 +301,8 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
         cols_t, rows_t = int(tcfg.get("cols", 10)), int(tcfg.get("rows", 20))
         board_h = float(tcfg.get("board_height", 0.5))
         board_w = board_h * (cols_t / rows_t)
-        init_img = TetrisGame(cols=cols_t, rows=rows_t, seed=0).to_image()
+        cell_px = int(tcfg.get("render_cell_px", 14))
+        init_img = TetrisGame(cols=cols_t, rows=rows_t, seed=0).to_image(cell_px)
         # PsychoPy maps numpy row 0 to the bottom, so flipVert keeps the stack down.
         tetris_stim = visual.ImageStim(
             win, image=init_img, size=(board_w, board_h), units="height",
@@ -311,7 +312,7 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                                        fillColor=txt_color, lineColor=txt_color,
                                        pos=(0, 0))
         cc.log(f"Tetris {cols_t}x{rows_t}, board {board_w:.2f}x{board_h:.2f}h, "
-               f"tick {tcfg.get('tick_interval_s', 0.045)}s.")
+               f"speed {tcfg.get('speed_s_per_step', 0.045)}s/step.")
 
     global_clock = core.Clock()
 
@@ -385,11 +386,12 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                 btarget, float(g.get("switch_min_interval_s", 1.2)),
                 float(g.get("switch_max_interval_s", 3.5)), rng)
         elif visual_mode == "tetris":
-            # Deterministic per-trial game (seed = base + session seed + trial).
+            # Deterministic per-trial game (seed = base + master seed + trial).
+            game_seed = int(tcfg.get("seed_base", 0)) + seed + trial_idx
             game = TetrisGame(
                 cols=int(tcfg.get("cols", 10)), rows=int(tcfg.get("rows", 20)),
-                seed=int(tcfg.get("seed_base", 0)) + seed + trial_idx,
-                tick_interval_s=float(tcfg.get("tick_interval_s", 0.045)),
+                seed=game_seed,
+                tick_interval_s=float(tcfg.get("speed_s_per_step", 0.045)),
                 flash_s=float(tcfg.get("flash_s", 0.18)))
         elif movie is not None:
             # Seek to the random offset now (pre-onset), so the decode latency is
@@ -404,6 +406,8 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
         aborted = False
         gabor_switches = 0
         tetris_clears = 0
+        tetris_max_height = 0
+        game_record_file = None
         instruction_seconds = None
         delay_seconds = None
         delay_frames = None
@@ -490,21 +494,44 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                         aborted = True
                         break
             elif visual_mode == "tetris":
-                # Advance the self-playing game frame-by-frame; count clears.
+                # Advance the self-playing game frame-by-frame. Record the exact
+                # display frame times (relative to onset) so the game can be
+                # reconstructed to mp4 afterwards.
+                cell_px = int(tcfg.get("render_cell_px", 14))
                 prev_t = 0.0
+                frame_times: list[float] = []
                 while block_clock.getTime() < btarget:
                     t = block_clock.getTime()
                     game.update(t - prev_t)
                     prev_t = t
-                    tetris_stim.image = game.to_image()
+                    tetris_stim.image = game.to_image(cell_px)
                     tetris_stim.draw()
                     if tetris_fix is not None:
                         tetris_fix.draw()
                     win.flip()
+                    frame_times.append(round(block_clock.getTime(), 5))
                     if event.getKeys(keyList=["escape"]):
                         aborted = True
                         break
                 tetris_clears = game.line_clear_events
+                tetris_max_height = game.max_stack_height
+                game_record_file = _save_game_record(
+                    paths, subject, session_ts, trial_idx, {
+                        "seed": game_seed,
+                        "cols": int(tcfg.get("cols", 10)),
+                        "rows": int(tcfg.get("rows", 20)),
+                        "tick_interval_s": float(tcfg.get("speed_s_per_step", 0.045)),
+                        "flash_s": float(tcfg.get("flash_s", 0.18)),
+                        "render_cell_px": cell_px,
+                        "refresh_hz": round(refresh_hz, 3),
+                        "block_duration_s": round(block_clock.getTime(), 4),
+                        "n_display_frames": len(frame_times),
+                        "frame_times_s": frame_times,
+                        "line_clear_events": tetris_clears,
+                        "rows_cleared": game.rows_cleared,
+                        "max_stack_height": tetris_max_height,
+                        "resets": game.resets,
+                    })
             else:
                 speed = float(vis["gabor"].get("rotation_speed_dps", 75.0))
                 direction, sw_idx, prev_t = 1, 0, 0.0
@@ -542,7 +569,8 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                     probe = _probe_audio(win, event, core, cfg, entry, words_file,
                                          btarget, min_word_len, rng, txt_color)
                 elif visual_mode == "tetris":
-                    probe = _probe_count(win, event, core, cfg, tetris_clears,
+                    # Scored against the peak stack height (highest number of rows).
+                    probe = _probe_count(win, event, core, cfg, tetris_max_height,
                                          txt_color, tcfg.get("probe_question"))
                 elif visual_mode == "gabor":
                     probe = _probe_count(win, event, core, cfg, gabor_switches,
@@ -578,6 +606,10 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                               else None),
             "gabor_switches": gabor_switches if visual_mode == "gabor" else None,
             "tetris_clears": tetris_clears if visual_mode == "tetris" else None,
+            "tetris_max_height": (tetris_max_height if visual_mode == "tetris"
+                                  else None),
+            "game_record_file": (os.path.relpath(game_record_file, cc.BASE_DIR)
+                                 if game_record_file else None),
             "word_boundary_file": os.path.relpath(words_file, cc.BASE_DIR),
             "instruction_seconds": (round(instruction_seconds, 4)
                                     if instruction_seconds is not None else None),
@@ -665,7 +697,7 @@ def _attend_hint(attended: str, visual_mode: str) -> str:
     if attended == "Audio":
         return "Listen for the words."
     if visual_mode == "tetris":
-        return "Count the row clears."
+        return "Track the tallest the stack gets."
     if visual_mode == "gabor":
         return "Count the direction reversals."
     return ""
@@ -869,6 +901,23 @@ def _append_behavior_csv(paths: cc.Paths, record: dict) -> None:
         w.writerow(record)
 
 
+def _save_game_record(paths: cc.Paths, subject: str, session_ts: str,
+                      trial_idx: int, meta: dict) -> str:
+    """
+    Save one Tetris trial's reconstruction record (seed + params + duration +
+    display frame times). The game is deterministic, so reconstruct_tetris.py can
+    render a faithful mp4 from this afterwards. Returns the file path.
+    """
+    os.makedirs(paths.games_dir, exist_ok=True)
+    out = os.path.join(paths.games_dir,
+                       f"{subject}_{session_ts}_t{trial_idx:03d}.json")
+    payload = {"subject": subject, "session_timestamp": session_ts,
+               "trial": trial_idx, **meta}
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return out
+
+
 def _write_session_json(paths, subject, session_ts, seed, cfg, webcam_info,
                         records) -> None:
     """Write one JSON per session with all trial records + session metadata."""
@@ -883,6 +932,7 @@ def _write_session_json(paths, subject, session_ts, seed, cfg, webcam_info,
         "accuracy": (round(n_ok / len(scored), 4) if scored else None),
         "visual_mode": cfg["visual"].get("mode"),
         "block_seconds": cfg["experiment"]["block_seconds"],
+        "config": cfg,                       # full config snapshot for provenance
         "webcam": webcam_info,
         "trials": records,
     }
@@ -917,7 +967,9 @@ def main() -> None:
     paths = cc.Paths.from_config(cfg).ensure()
     manifest = cc.read_manifest(paths.manifest)
 
-    seed = args.seed if args.seed is not None else _dt.datetime.now().microsecond
+    # Fixed master seed from config (reproducible session), unless overridden.
+    seed = (args.seed if args.seed is not None
+            else int(cfg["experiment"].get("seed", 0)))
     rng = random.Random(seed)
     cc.log(f"Subject {args.subject}, seed {seed}, "
            f"{cfg['experiment'].get('n_trials')} trials.")

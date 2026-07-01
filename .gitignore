@@ -232,3 +232,6 @@ webcam/
 
 # macOS
 .DS_Store
+
+# Tetris reconstruction records + rendered mp4s (per-subject data)
+games/

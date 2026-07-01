@@ -45,6 +45,7 @@ class Paths:
     stim_dir: str
     audio_dir: str
     behavior_dir: str
+    games_dir: str
     manifest: str
 
     @classmethod
@@ -55,12 +56,13 @@ class Paths:
             stim_dir=stim_dir,
             audio_dir=os.path.join(stim_dir, p["audio_subdir"]),
             behavior_dir=_abs(p["behavior_dir"]),
+            games_dir=_abs(p.get("games_dir", "games")),
             manifest=_abs(p["manifest"]),
         )
 
     def ensure(self) -> "Paths":
         """Create the directories if they don't yet exist."""
-        for d in (self.stim_dir, self.audio_dir, self.behavior_dir):
+        for d in (self.stim_dir, self.audio_dir, self.behavior_dir, self.games_dir):
             os.makedirs(d, exist_ok=True)
         return self
 

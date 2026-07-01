@@ -48,10 +48,19 @@ experiment:
   audio_lib: [ptb, sounddevice, pyo]   # PTB first for schedulable, low-latency audio
   fallback_refresh_hz: 60.0            # used only if the refresh rate can't be measured
 
-  gap_seconds: 1.0                # frame-counted fixation buffer before the block
-  block_seconds: 30.0             # hard cap on audiovisual playback
-  block_mode: audio               # audio = run for the clip's length (capped);
-                                  # fixed = always run the full block_seconds
+  n_trials: 60                    # trials run back-to-back in one session
+  inter_trial_interval_s: 0.8     # blank fixation between trials
+  gap_seconds: 1.0                # frame-counted fixation buffer before each block
+  block_seconds: 20.0             # audiovisual block length per trial
+  block_mode: fixed               # fixed = every block is exactly block_seconds;
+                                  # audio = run for the clip's length (capped)
+
+  # Attentional focus per trial:
+  #   auto   (default) = the experiment assigns focus, balanced 50/50 and
+  #                      shuffled, and CUES the subject ("Attend to the AUDIO").
+  #   manual           = the subject chooses each trial (LEFT=Audio/RIGHT=Visual).
+  focus_mode: auto
+  cue_seconds: 1.5                # how long the auto focus cue is shown
 
 # ---------------------------------------------------------------------------
 # Attention-check probe (shown after the block). Format: yes / no.
@@ -86,11 +95,11 @@ probe:
 # you must then fill in each probe's `correct:` after watching the clip).
 # ---------------------------------------------------------------------------
 visual:
-  mode: gabor                     # gabor | video
+  mode: video                     # gabor | video
 
   gabor:
-    size: 0.16                    # patch diameter in height units (kept small)
-    cycles: 6.0                   # number of grating cycles across the patch
+    size: 0.26                    # patch diameter in height units (kept small)
+    cycles: 3.0                   # number of grating cycles across the patch
     contrast: 1.0
     rotation_speed_dps: 75.0      # rotation speed, degrees per second
     switch_min_interval_s: 1.2    # random reversal every [min, max] seconds
@@ -101,6 +110,19 @@ visual:
   video:
     file: stim_files/tetris.mp4
     scale: 1.8                    # on-screen size, multiple of native pixels
+    random_start: true            # each trial seeks to a RANDOM offset -> a
+                                  # different ~block_seconds cut of the clip
+    min_gap_from_end_s: 0.5       # keep the random cut this far from the end
+
+    # Random cuts are drawn ONLY from valid black-and-white GAME segments listed
+    # in this file (produced by build_video_segments.py). If the file is missing
+    # the runner falls back to cutting from the whole clip.
+    segments_file: stims/video/tetris_segments.json
+    filter:                       # parameters for build_video_segments.py
+      sample_interval_s: 0.20     # analyse one frame every N seconds
+      saturation_threshold: 12    # mean HSV saturation < this  ->  grayscale (game)
+      min_segment_s: 20.0         # keep grayscale runs at least this long (>= block)
+      merge_gap_s: 0.6            # bridge colour blips shorter than this
     probes:                       # yes/no game probes; set each `correct` yourself
       - id: score_threshold
         question: "Did the score go above 10,000 points?"
@@ -130,4 +152,16 @@ webcam:
   container: mp4                  # output file extension
   required: false                 # true = abort the block if the camera won't open
   max_seconds: 600                # safety cap on a single recording
+
+# ---------------------------------------------------------------------------
+# Photodiode trigger square. A solid square is shown in the bottom-right corner
+# for the whole 1-second gap: its RISING edge marks the gap onset and its
+# FALLING edge marks the audiovisual onset (gap end), so a photodiode taped to
+# that corner gives hardware-precise timing for the EEG.
+# ---------------------------------------------------------------------------
+trigger:
+  enabled: true
+  size_px: 100                    # square side length in pixels
+  color: white                    # square colour (on black background)
+  corner: bottom-right            # bottom-right | bottom-left | top-right | top-left
 

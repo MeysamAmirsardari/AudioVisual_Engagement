@@ -103,3 +103,71 @@ def audio_duration_seconds(wav_path: str) -> float:
     import soundfile as sf
     info = sf.info(wav_path)
     return info.frames / float(info.samplerate)
+
+
+# --------------------------------------------------------------------------
+# Probe word bank (shared by build_stimuli.py and run_block.py)
+# --------------------------------------------------------------------------
+# Common, concrete content words used as FALSE probe targets (words that are
+# plausibly speakable but chosen to be ABSENT from a given transcript).
+COMMON_WORDS = [
+    "anchor", "purple", "engine", "harbor", "candle", "ladder", "silver",
+    "meadow", "rocket", "pencil", "garden", "bottle", "thunder", "marble",
+    "velvet", "copper", "lantern", "pillow", "saddle", "feather", "orchard",
+    "cabinet", "blanket", "compass", "diamond", "kettle", "mirror", "ribbon",
+    "tunnel", "wagon", "whistle", "balloon", "biscuit", "cottage", "dolphin",
+    "glacier", "hammer", "jacket", "kingdom", "magnet",
+]
+
+# Function words excluded when picking TRUE probe targets from a transcript.
+STOPWORDS = {
+    "the", "and", "that", "with", "this", "from", "they", "have", "were",
+    "their", "what", "when", "your", "which", "them", "then", "than", "into",
+    "been", "more", "some", "such", "only", "would", "could", "should", "about",
+    "there", "these", "those", "here", "very", "just", "also", "upon", "shall",
+    "will", "him", "her", "his", "its", "our", "are", "was", "for", "not",
+    "but", "you", "had", "has",
+}
+
+
+def content_words(transcript: str, min_len: int) -> list[str]:
+    """Lower-cased content words from a transcript suitable as probe targets."""
+    toks = [t.strip(".,!?;:\"'()").lower() for t in transcript.split()]
+    return [t for t in toks
+            if t.isalpha() and len(t) >= min_len
+            and t not in STOPWORDS and t != "unk"]
+
+
+def make_trial_audio_probe(words: list[dict], transcript: str, min_len: int,
+                           rng, window_end_s: float | None = None) -> dict | None:
+    """
+    Build ONE yes/no 'was WORD spoken?' probe for a trial, correct answer
+    balanced ~50/50. When `window_end_s` is given, TRUE targets are drawn only
+    from words actually heard within that window (so the probe is valid even
+    when only the first N seconds of a longer clip are played).
+    """
+    heard = [(w.get("word") or "").strip(".,!?;:\"'()").lower()
+             for w in words
+             if not w.get("is_unk")
+             and (window_end_s is None or float(w.get("end_s", 0)) <= window_end_s)]
+    present_pool = sorted({w for w in heard
+                           if w.isalpha() and len(w) >= min_len
+                           and w not in STOPWORDS})
+    transcript_set = set(content_words(transcript, 1))
+    absent_pool = [w for w in COMMON_WORDS
+                   if w not in transcript_set and len(w) >= min_len]
+
+    want_present = rng.random() < 0.5
+    if want_present and present_pool:
+        tw = rng.choice(present_pool)
+        return {"target_word": tw, "present": True,
+                "question": f'Was the word "{tw}" spoken?'}
+    if absent_pool:
+        fw = rng.choice(absent_pool)
+        return {"target_word": fw, "present": False,
+                "question": f'Was the word "{fw}" spoken?'}
+    if present_pool:                       # fallback if no absent word available
+        tw = rng.choice(present_pool)
+        return {"target_word": tw, "present": True,
+                "question": f'Was the word "{tw}" spoken?'}
+    return None

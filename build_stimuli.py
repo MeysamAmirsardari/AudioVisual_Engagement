@@ -37,26 +37,8 @@ import numpy as np
 import cma_common as cc
 
 # A small bank of common, concrete content words used as FALSE probe targets
-# (a word that is plausibly speakable but, when chosen, is absent from a given
-# transcript). Kept generic so it rarely collides with LibriSpeech vocabulary.
-COMMON_WORDS = [
-    "anchor", "purple", "engine", "harbor", "candle", "ladder", "silver",
-    "meadow", "rocket", "pencil", "garden", "bottle", "thunder", "marble",
-    "velvet", "copper", "lantern", "pillow", "saddle", "feather", "orchard",
-    "cabinet", "blanket", "compass", "diamond", "kettle", "mirror", "ribbon",
-    "tunnel", "wagon", "whistle", "balloon", "biscuit", "cottage", "dolphin",
-    "glacier", "hammer", "jacket", "kingdom", "magnet",
-]
-
-# Function words excluded when picking TRUE probe targets from a transcript.
-STOPWORDS = {
-    "the", "and", "that", "with", "this", "from", "they", "have", "were",
-    "their", "what", "when", "your", "which", "them", "then", "than", "into",
-    "been", "more", "some", "such", "only", "would", "could", "should", "about",
-    "there", "these", "those", "here", "very", "just", "also", "upon", "shall",
-    "will", "they", "him", "her", "his", "its", "our", "are", "was", "for",
-    "not", "but", "you", "had", "has",
-}
+# The probe word bank (COMMON_WORDS / STOPWORDS / content_words) lives in
+# cma_common so build_stimuli.py and run_block.py share a single source of truth.
 
 # Sentence bank used only by the TTS fallback to compose varied paragraphs.
 SENTENCE_BANK = [
@@ -82,25 +64,17 @@ SENTENCE_BANK = [
 # ===========================================================================
 # Probe construction (yes/no "was WORD spoken?")
 # ===========================================================================
-def _content_words(transcript: str, min_len: int) -> list[str]:
-    """Lower-cased content words from a transcript suitable as probe targets."""
-    toks = [t.strip(".,!?;:\"'()").lower() for t in transcript.split()]
-    return [
-        t for t in toks
-        if t.isalpha() and len(t) >= min_len
-        and t not in STOPWORDS and t != "unk"
-    ]
-
-
 def make_audio_probes(transcript: str, min_len: int, rng: random.Random) -> list[dict]:
     """
-    Build the two yes/no probe variants for a clip:
+    Build the two yes/no probe variants for a clip (stored in the manifest as a
+    reference / for full-clip playback):
       * a TRUE-target probe  — a content word that DOES occur in the transcript.
       * a FALSE-target probe — a common word that does NOT occur in it.
-    The runner picks one per trial so the correct answer stays balanced.
+    (The runner generates its own window-aware probe at trial time; see
+    cma_common.make_trial_audio_probe.)
     """
-    present_pool = _content_words(transcript, min_len)
-    transcript_set = set(_content_words(transcript, 1))  # any-length, for membership
+    present_pool = cc.content_words(transcript, min_len)
+    transcript_set = set(cc.content_words(transcript, 1))  # any-length, membership
 
     probes: list[dict] = []
     if present_pool:
@@ -108,7 +82,7 @@ def make_audio_probes(transcript: str, min_len: int, rng: random.Random) -> list
         probes.append({"target_word": tw, "present": True,
                        "question": f'Was the word "{tw}" spoken?'})
 
-    absent_pool = [w for w in COMMON_WORDS
+    absent_pool = [w for w in cc.COMMON_WORDS
                    if w not in transcript_set and len(w) >= min_len]
     if absent_pool:
         fw = rng.choice(absent_pool)

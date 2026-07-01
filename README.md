@@ -14,7 +14,10 @@ audio/alignment is regenerated at run time.
 |------|---------|
 | `config.yaml` | All parameters (paths, timing, dataset, probes). Edit this, not the code. |
 | `build_stimuli.py` | **Run once.** Downloads real speech + word onsets into `stims/` and writes `stims/manifest.json`. |
-| `run_block.py` | Runs one experimental block from the prepared library; logs to `behavior/`. |
+| `run.py` | **The launcher** — collects subject/session metadata and runs a session into `data/<subject>/<session>/`. |
+| `run_block.py` | The session engine (called by `run.py`; also runnable directly for quick tests / `--test-trigger`). |
+| `reconstruct_tetris.py` | Renders the saved Tetris games to MP4 after a session. |
+| `data/` | Per-subject / per-session output (see below). *(git-ignored)* |
 | `cma_common.py` | Shared config / manifest / path helpers. |
 | `cma_webcam.py` | Separate-process webcam recorder (used by `run_block.py`). |
 | `tetris/` | Self-playing black-and-white Tetris (the default visual stimulus). |
@@ -62,11 +65,32 @@ are skipped). Re-run it if you change the video or `visual.video.filter`.
 
 ## 2. Run a session
 
+Use the launcher — it collects participant/session metadata (a GUI dialog, or
+`--no-gui` + flags) and organises everything under `data/<subject>/<session>/`:
+
 ```bash
-python run_block.py --subject sub01              # experiment.n_trials trials
-python run_block.py --subject sub01 --trials 10  # override the trial count
-python run_block.py --subject sub01 --seed 42    # reproducible clips/cuts/probes
+python run.py                                    # GUI dialog for the metadata
+python run.py --subject P01 --session 01         # prefilled dialog
+python run.py --subject P01 --session 01 --no-gui \
+              --age 24 --sex female --handedness right --experimenter MA
+python run.py --subject P01 --session 01 --trials 4 --no-gui   # short test
 ```
+
+Each session is written to (and will not overwrite an existing one without
+`--force`):
+
+```
+data/<subject>/<session>/
+    session_info.json     participant + session metadata + provenance (git commit,
+                          seed, config file, software versions)
+    behavior/             <subject>.csv + per-session JSON (all trial data)
+    games/                Tetris reconstruction records  ->  reconstruct_tetris.py
+    webcam/               webcam recording(s)
+```
+
+`run_block.py` is the underlying engine and can still be run directly for quick
+tests (writes to the flat `behavior/`, `games/`, `webcam/` defaults) and for
+`--test-trigger`.
 
 One session runs `experiment.n_trials` (default **60**) trials back-to-back.
 Per trial: **focus cue/choice** → **jittered fixation delay** (base

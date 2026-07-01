@@ -10,11 +10,14 @@
 # ============================================================================
 
 paths:
-  stim_dir: stims                 # prepared/downloaded stimuli live here
+  stim_dir: stims                 # prepared/downloaded stimuli (SHARED library)
   audio_subdir: audio             # -> stims/audio/<id>.wav + <id>.words.json/csv
-  behavior_dir: behavior          # per-subject behavioural logs
-  games_dir: games                # per-trial Tetris reconstruction records (-> mp4)
   manifest: stims/manifest.json   # index of every prepared stimulus
+  # Per-session outputs. `run.py` organises them under data/<subject>/<session>/;
+  # these plain defaults are used only when running run_block.py directly.
+  data_root: data                 # root of per-subject / per-session output
+  behavior_dir: behavior
+  games_dir: games
 
 # ---------------------------------------------------------------------------
 # Stimulus library builder (build_stimuli.py). Run once; reuse every session.

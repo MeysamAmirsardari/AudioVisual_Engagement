@@ -193,7 +193,7 @@ def _test_trigger(cfg: dict) -> None:
 # Session
 # ===========================================================================
 def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
-                rng: random.Random, seed: int) -> None:
+                rng: random.Random, seed: int, session: str = "") -> None:
     """Open the PsychoPy window ONCE and run all trials back-to-back."""
     exp = cfg["experiment"]
     vis = cfg["visual"]
@@ -600,6 +600,7 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
 
         return {
             "subject": subject,
+            "session": session,
             "trial": trial_idx,
             "n_trials": n_trials,
             "timestamp": _dt.datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -682,7 +683,8 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
         cc.log(f"Webcam stopped: {st.get('frames')} frames, "
                f"{st.get('duration_s')}s -> {webcam_info['file']}")
 
-    _write_session_json(paths, subject, session_ts, seed, cfg, webcam_info, records)
+    _write_session_json(paths, subject, session_ts, seed, cfg, webcam_info,
+                        records, session)
     acc = f"{n_correct}/{n_scored}" if n_scored else "n/a"
     cc.log(f"Session complete: {len(records)} trial(s), probe accuracy {acc}.")
 
@@ -929,14 +931,15 @@ def _save_game_record(paths: cc.Paths, subject: str, session_ts: str,
 
 
 def _write_session_json(paths, subject, session_ts, seed, cfg, webcam_info,
-                        records) -> None:
+                        records, session="") -> None:
     """Write one JSON per session with all trial records + session metadata."""
     os.makedirs(paths.behavior_dir, exist_ok=True)
     out = os.path.join(paths.behavior_dir, f"{subject}_{session_ts}_session.json")
     scored = [r for r in records if r["probe_correct"] is not None]
     n_ok = sum(1 for r in scored if r["probe_correct"])
     payload = {
-        "subject": subject, "session_timestamp": session_ts, "seed": seed,
+        "subject": subject, "session": session,
+        "session_timestamp": session_ts, "seed": seed,
         "n_trials_run": len(records), "n_scored": len(scored),
         "n_correct": n_ok,
         "accuracy": (round(n_ok / len(scored), 4) if scored else None),

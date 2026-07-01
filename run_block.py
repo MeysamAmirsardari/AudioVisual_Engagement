@@ -701,7 +701,8 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
 # Probe presentation
 # ===========================================================================
 def _key_label(key: str) -> str:
-    return {"left": "←", "right": "→", "up": "↑", "down": "↓"}.get(key, key.upper())
+    return {"left": "LEFT", "right": "RIGHT",
+            "up": "UP", "down": "DOWN"}.get(key, key.upper())
 
 
 def _attend_hint(attended: str, visual_mode: str) -> str:
@@ -724,8 +725,14 @@ def _run_yes_no(win, event, core, cfg, question: str, correct_present,
     quit_key = cfg["probe"].get("quit_key", "escape")
     header = cfg["probe"].get("instruction", "")
 
-    prompt = (f"{header}\n\n{question}\n\n"
-              f"YES ({_key_label(yes_key)})        NO ({_key_label(no_key)})")
+    # Lay the options out so their on-screen SIDE matches their key: the option
+    # bound to the left key sits on the left. With no=left / yes=right this reads
+    # "NO (<-)      YES (->)".
+    _side = {"left": 0, "right": 2}
+    opts = sorted([("YES", yes_key), ("NO", no_key)],
+                  key=lambda o: _side.get(o[1], 1))
+    labels = "        ".join(f"{name} ({_key_label(k)})" for name, k in opts)
+    prompt = f"{header}\n\n{question}\n\n{labels}"
     visual.TextStim(win, text=prompt, color=txt_color, height=0.05,
                     wrapWidth=1.5, alignText="center").draw()
     win.flip()

@@ -17,7 +17,8 @@ audio/alignment is regenerated at run time.
 | `run_block.py` | Runs one experimental block from the prepared library; logs to `behavior/`. |
 | `cma_common.py` | Shared config / manifest / path helpers. |
 | `cma_webcam.py` | Separate-process webcam recorder (used by `run_block.py`). |
-| `build_video_segments.py` | **Run once.** Detects the black-and-white game segments of the video. |
+| `tetris/` | Self-playing black-and-white Tetris (the default visual stimulus). |
+| `build_video_segments.py` | (Only for `visual.mode: video`) detects the game segments of the recorded clip. |
 | `stims/` | Prepared audio (`*.wav` + `*.words.json/csv`) + `manifest.json`. *(git-ignored)* |
 | `behavior/` | Per-subject behavioural logs (`<subject>.csv` + per-block JSON). *(git-ignored)* |
 | `webcam/` | Per-block webcam recordings + frame-timestamp sidecars. *(git-ignored)* |
@@ -68,11 +69,18 @@ python run_block.py --subject sub01 --seed 42    # reproducible clips/cuts/probe
 ```
 
 One session runs `experiment.n_trials` (default **60**) trials back-to-back.
-Per trial: **focus cue/choice** → 1.000 s frame-counted fixation → synchronous
-visual stimulus + speech clip (PTB flip-scheduled onset, `experiment.block_seconds`
-long, default **20 s**) → attention probe about the **attended** stream → an
-inter-trial fixation. Audio clips are assigned in a balanced shuffle. Results: one
-row per trial in `behavior/<subject>.csv` plus a per-session JSON.
+Per trial: **focus cue/choice** → **jittered fixation delay** (base
+`gap_seconds`, default 2 s, + Gaussian jitter) → synchronous visual stimulus +
+speech clip (PTB flip-scheduled onset, `experiment.block_seconds` long, default
+**20 s**) → attention probe about the **attended** stream → an inter-trial
+fixation. Audio clips are assigned in a balanced shuffle. Results: one row per
+trial in `behavior/<subject>.csv` plus a per-session JSON.
+
+**Timing jitter (`experiment.jitter`):** the pre-stimulus delay is jittered per
+trial to decorrelate onsets for EEG — Gaussian `std_ms` (default 150), clamped to
+±`max_ms` (default 300). The log records the actual `delay_seconds`,
+`delay_jitter_ms`, `delay_frames`, and the `instruction_seconds` (measured length
+of the cue/choice screen).
 
 **Focus assignment (`experiment.focus_mode`):**
 - **`auto` (default)** — the experiment assigns focus, **balanced 50/50 and
@@ -86,14 +94,22 @@ audiovisual onset** — for hardware-precise EEG timing. Size/corner configurabl
 
 ## Visual stimulus (`visual.mode`)
 
-- **`video` (default)** — the muted `tetris.mp4` (scaled ×`visual.video.scale`).
-  With `visual.video.random_start: true`, **each trial seeks to a random offset**,
-  so every trial shows a different `block_seconds` cut — drawn **only from the
-  black-and-white game segments** (see step 1b), never the colour menus/intros.
-  Attend-visual uses the yes/no game probes — see the caveat below.
+- **`tetris` (default)** — a **self-playing, black-and-white Tetris** (in
+  `tetris/`), watched passively. Deterministic (seeded per trial), grayscale
+  (no colour confound), compact and **centred with a fixation dot** to limit eye
+  movements. Cleared rows briefly **flash**; attend-visual is to **count those
+  flashes**, scored automatically against the known count (`tetris_clears`). No
+  recorded video, no non-game sections, no random-cut machinery. Tune board
+  size/speed under `visual.tetris`. (Preview: `python tetris/tetris_game.py
+  --save-frames 6` writes frames to `/tmp`.)
 - **`gabor`** — a small, centred Gabor patch that rotates and randomly **reverses
   direction**; attend-visual counts the reversals (numeric probe, auto-scored).
-  Fixation-locked, so it avoids the eye-movement confound of a moving video.
+- **`video`** — the pre-recorded `tetris.mp4` with random cuts from the
+  black-and-white game segments (needs `build_video_segments.py`; attend-visual
+  trials are logged unscored — see the caveat below).
+
+All three keep the eyes centred; the auto cue reminds the subject of the task
+("Count the row clears" / "reversals" / "Listen for the words").
 
 The auditory task (either mode) is a yes/no "was *WORD* spoken?" probe whose
 target is chosen at trial time from words actually heard within the played

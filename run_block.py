@@ -85,6 +85,19 @@ def _assign_focus(n_trials: int, rng: random.Random) -> list[str]:
     return seq
 
 
+def _jittered_delay(base_s: float, jcfg: dict, rng: random.Random):
+    """
+    Delay (gap) length for a trial: base + Gaussian jitter (std_ms), clamped to
+    +/- max_ms. Returns (delay_seconds, jitter_seconds). Never negative.
+    """
+    if not jcfg or not jcfg.get("enabled"):
+        return base_s, 0.0
+    std = float(jcfg.get("std_ms", 150)) / 1000.0
+    mx = float(jcfg.get("max_ms", 300)) / 1000.0
+    j = max(-mx, min(mx, rng.gauss(0.0, std)))
+    return max(0.0, base_s + j), j
+
+
 def _load_cut_ranges(cfg: dict, vid_dur: float, block_cap: float):
     """
     Valid [lo, hi] start-offset ranges for random video cuts. Prefers the
@@ -191,6 +204,9 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
     iti = float(exp.get("inter_trial_interval_s", 0.8))
     focus_mode = exp.get("focus_mode", "auto")
     cue_seconds = float(exp.get("cue_seconds", 1.5))
+    start_on_space = bool(exp.get("start_on_space", True))
+    gap_base = float(exp["gap_seconds"])
+    jitter_cfg = exp.get("jitter", {}) or {}
     min_word_len = int(cfg["probe"]["audio"]["min_word_len"])
 
     # --- Validate the library + assets BEFORE opening any window ------------
@@ -229,10 +245,10 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
     measured = win.getActualFrameRate(nIdentical=10, nMaxFrames=120,
                                        nWarmUpFrames=10, threshold=1)
     refresh_hz = measured if measured else float(exp["fallback_refresh_hz"])
-    gap_frames = int(round(float(exp["gap_seconds"]) * refresh_hz))
-    cc.log(f"Refresh ~{refresh_hz:.2f} Hz -> {gap_frames} frames for the "
-           f"{exp['gap_seconds']:.3f}s gap. Session: {n_trials} trials of "
-           f"{block_cap:.0f}s ({visual_mode}).")
+    jit = (f"+/-jitter(std {jitter_cfg.get('std_ms')}ms, max {jitter_cfg.get('max_ms')}ms)"
+           if jitter_cfg.get("enabled") else "no jitter")
+    cc.log(f"Refresh ~{refresh_hz:.2f} Hz. Session: {n_trials} trials of "
+           f"{block_cap:.0f}s ({visual_mode}); base delay {gap_base:.2f}s {jit}.")
 
     # --- Reusable visual components -----------------------------------------
     instruction = visual.TextStim(
@@ -276,12 +292,50 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
         cc.log(f"Random cuts drawn from {cut_source} "
                f"({usable:.0f}s of valid start range).")
 
+    # --- Tetris self-playing visual stimulus (reused ImageStim per frame) ----
+    TetrisGame = None
+    tetris_stim = tetris_fix = None
+    tcfg = vis.get("tetris", {}) or {}
+    if visual_mode == "tetris":
+        from tetris import TetrisGame       # local import (pulls only numpy)
+        cols_t, rows_t = int(tcfg.get("cols", 10)), int(tcfg.get("rows", 20))
+        board_h = float(tcfg.get("board_height", 0.5))
+        board_w = board_h * (cols_t / rows_t)
+        init_img = TetrisGame(cols=cols_t, rows=rows_t, seed=0).to_image()
+        # PsychoPy maps numpy row 0 to the bottom, so flipVert keeps the stack down.
+        tetris_stim = visual.ImageStim(
+            win, image=init_img, size=(board_w, board_h), units="height",
+            interpolate=False, flipVert=bool(tcfg.get("flip_vertical", True)))
+        if tcfg.get("show_fixation", True):
+            tetris_fix = visual.Circle(win, radius=0.006, units="height",
+                                       fillColor=txt_color, lineColor=txt_color,
+                                       pos=(0, 0))
+        cc.log(f"Tetris {cols_t}x{rows_t}, board {board_w:.2f}x{board_h:.2f}h, "
+               f"tick {tcfg.get('tick_interval_s', 0.045)}s.")
+
     global_clock = core.Clock()
 
     # --- Session webcam (ONE recording for the whole session) ---------------
     session_ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     webcam, webcam_info = _start_webcam(cfg, subject, f"{session_ts}_session",
                                         win, visual, core, txt_color)
+
+    # --- Session intro / fixation instruction (once) ------------------------
+    visual.TextStim(
+        win, color=txt_color, height=0.045, wrapWidth=1.5, alignText="center",
+        text=("Keep your eyes on the central fixation dot throughout.\n\n"
+              "Before each trial you will be told which stream to attend:\n"
+              "AUDIO — listen for the spoken words.\n"
+              "VISUAL — count the events (e.g. row clears / reversals).\n\n"
+              "Press SPACE to begin, or ESC to quit.")).draw()
+    win.flip()
+    event.clearEvents()
+    if "escape" in (event.waitKeys(keyList=["space", "escape"]) or []):
+        if webcam is not None:
+            webcam.stop()
+        win.close()
+        core.quit()
+        return
 
     # --- Audio Sound cache (avoid reloading the same clip repeatedly) -------
     snd_cache: dict[str, object] = {}
@@ -314,6 +368,7 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
 
         # Per-trial visual setup
         gabor = gabor_fix = None
+        game = None
         switch_times: list[float] = []
         if visual_mode == "gabor":
             g = vis["gabor"]
@@ -329,6 +384,13 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
             switch_times = _gen_switch_times(
                 btarget, float(g.get("switch_min_interval_s", 1.2)),
                 float(g.get("switch_max_interval_s", 3.5)), rng)
+        elif visual_mode == "tetris":
+            # Deterministic per-trial game (seed = base + session seed + trial).
+            game = TetrisGame(
+                cols=int(tcfg.get("cols", 10)), rows=int(tcfg.get("rows", 20)),
+                seed=int(tcfg.get("seed_base", 0)) + seed + trial_idx,
+                tick_interval_s=float(tcfg.get("tick_interval_s", 0.045)),
+                flash_s=float(tcfg.get("flash_s", 0.18)))
         elif movie is not None:
             # Seek to the random offset now (pre-onset), so the decode latency is
             # paid before the timing-critical block starts.
@@ -341,6 +403,11 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
         choice_key = attended = None
         aborted = False
         gabor_switches = 0
+        tetris_clears = 0
+        instruction_seconds = None
+        delay_seconds = None
+        delay_frames = None
+        jitter_s = 0.0
         gap_onset_wallclock = None
         av_onset_global = onset_wall = av_onset_wallclock = None
         block_duration = 0.0
@@ -349,24 +416,38 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                  "correct": None}
 
         # STEP 1 — focus: auto = cue the assigned stream; manual = subject chooses
+        # (its actual on-screen length is measured for the log).
         counter.text = f"Trial {trial_idx} / {n_trials}"
         if focus_mode == "auto":
             attended = assigned_focus
             choice_key = "auto"
-            visual.TextStim(win, text=f"Attend to the {attended.upper()}",
-                            color=txt_color, height=0.06).draw()
+            cue_text = f"Attend to the {attended.upper()}"
+            hint = _attend_hint(attended, visual_mode)
+            if hint:
+                cue_text += f"\n{hint}"
+            if start_on_space:
+                cue_text += "\n\nPress SPACE to start"
+            visual.TextStim(win, text=cue_text, color=txt_color, height=0.06,
+                            wrapWidth=1.4, alignText="center").draw()
             counter.draw()
             win.flip()
+            instr_clock = core.Clock()
             event.clearEvents()
-            got = event.waitKeys(maxWait=cue_seconds, keyList=["escape"])
+            if start_on_space:
+                got = event.waitKeys(keyList=["space", "escape"])  # self-paced
+            else:
+                got = event.waitKeys(maxWait=cue_seconds, keyList=["escape"])
+            instruction_seconds = instr_clock.getTime()
             if got and "escape" in got:
                 aborted = True
         else:
             instruction.draw()
             counter.draw()
             win.flip()
+            instr_clock = core.Clock()
             event.clearEvents()
             keys = event.waitKeys(keyList=["left", "right", "escape"])
+            instruction_seconds = instr_clock.getTime()
             if "escape" in keys:
                 aborted = True
             else:
@@ -374,8 +455,11 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                 attended = "Audio" if choice_key == "left" else "Visual"
 
         if not aborted:
-            # STEP 2 — frame-counted gap (photodiode trigger square shown here)
-            for gi in range(gap_frames):
+            # STEP 2 — jittered fixation delay, frame-counted (trigger square on)
+            delay_s, jitter_s = _jittered_delay(gap_base, jitter_cfg, rng)
+            delay_frames = max(1, int(round(delay_s * refresh_hz)))
+            delay_seconds = round(delay_frames / refresh_hz, 4)
+            for gi in range(delay_frames):
                 fixation.draw()
                 if trigger is not None:
                     trigger.draw()
@@ -405,6 +489,22 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                     if event.getKeys(keyList=["escape"]):
                         aborted = True
                         break
+            elif visual_mode == "tetris":
+                # Advance the self-playing game frame-by-frame; count clears.
+                prev_t = 0.0
+                while block_clock.getTime() < btarget:
+                    t = block_clock.getTime()
+                    game.update(t - prev_t)
+                    prev_t = t
+                    tetris_stim.image = game.to_image()
+                    tetris_stim.draw()
+                    if tetris_fix is not None:
+                        tetris_fix.draw()
+                    win.flip()
+                    if event.getKeys(keyList=["escape"]):
+                        aborted = True
+                        break
+                tetris_clears = game.line_clear_events
             else:
                 speed = float(vis["gabor"].get("rotation_speed_dps", 75.0))
                 direction, sw_idx, prev_t = 1, 0, 0.0
@@ -441,9 +541,13 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                 if attended == "Audio":
                     probe = _probe_audio(win, event, core, cfg, entry, words_file,
                                          btarget, min_word_len, rng, txt_color)
+                elif visual_mode == "tetris":
+                    probe = _probe_count(win, event, core, cfg, tetris_clears,
+                                         txt_color, tcfg.get("probe_question"))
                 elif visual_mode == "gabor":
                     probe = _probe_count(win, event, core, cfg, gabor_switches,
-                                         txt_color)
+                                         txt_color,
+                                         vis["gabor"].get("probe_question"))
                 elif vis["video"].get("random_start", True):
                     # Random tetris cuts have no fixed ground truth, so a config
                     # game question can't be scored (and would mislead). Skip the
@@ -468,12 +572,19 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
             "audio_source": entry.get("source"),
             "speaker": entry.get("speaker"),
             "visual_mode": visual_mode,
-            "visual_stim": ("gabor" if visual_mode == "gabor"
-                            else os.path.relpath(video_file, cc.BASE_DIR)),
+            "visual_stim": ({"gabor": "gabor", "tetris": "tetris"}.get(
+                visual_mode, os.path.relpath(video_file, cc.BASE_DIR))),
             "video_start_s": (round(vid_offset, 3) if visual_mode == "video"
                               else None),
             "gabor_switches": gabor_switches if visual_mode == "gabor" else None,
+            "tetris_clears": tetris_clears if visual_mode == "tetris" else None,
             "word_boundary_file": os.path.relpath(words_file, cc.BASE_DIR),
+            "instruction_seconds": (round(instruction_seconds, 4)
+                                    if instruction_seconds is not None else None),
+            "delay_base_s": gap_base,
+            "delay_jitter_ms": round(jitter_s * 1000.0, 1),
+            "delay_seconds": delay_seconds,
+            "delay_frames": delay_frames,
             "gap_onset_wall_clock": gap_onset_wallclock,
             "av_onset_global_s": av_onset_global,
             "av_onset_wall_clock": onset_wall,
@@ -481,7 +592,6 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
             "block_target_s": round(btarget, 3),
             "block_duration_s": round(block_duration, 3),
             "refresh_hz": round(refresh_hz, 3),
-            "gap_frames": gap_frames,
             "probe_modality": probe["modality"],
             "probe_id": probe["probe_id"],
             "probe_question": probe["question"],
@@ -548,6 +658,17 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
 # ===========================================================================
 def _key_label(key: str) -> str:
     return {"left": "←", "right": "→", "up": "↑", "down": "↓"}.get(key, key.upper())
+
+
+def _attend_hint(attended: str, visual_mode: str) -> str:
+    """Short task reminder shown on the auto cue."""
+    if attended == "Audio":
+        return "Listen for the words."
+    if visual_mode == "tetris":
+        return "Count the row clears."
+    if visual_mode == "gabor":
+        return "Count the direction reversals."
+    return ""
 
 
 def _run_yes_no(win, event, core, cfg, question: str, correct_present,
@@ -672,11 +793,11 @@ def _collect_number(win, event, core, cfg, prompt: str, txt_color):
             entered = (entered + key.replace("num_", ""))[:3]
 
 
-def _probe_count(win, event, core, cfg, true_count: int, txt_color) -> dict:
-    """Numeric 'how many reversals?' probe for the attended-Gabor condition."""
-    question = cfg["visual"]["gabor"].get(
-        "probe_question",
-        "How many times did the grating reverse its rotation direction?")
+def _probe_count(win, event, core, cfg, true_count: int, txt_color,
+                 question=None) -> dict:
+    """Numeric count probe (Gabor reversals or Tetris row clears)."""
+    if not question:
+        question = "How many events did you count?"
     value, rt, aborted = _collect_number(win, event, core, cfg, question, txt_color)
     correct = None if value is None else (value == true_count)
     abs_err = None if value is None else abs(value - true_count)

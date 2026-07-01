@@ -261,6 +261,19 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
     counter = visual.TextStim(win, text="", color=txt_color, height=0.03,
                               pos=(0, -0.42))
 
+    # Focus cue: a small "attend to" line above a big "AUDIO"/"VISUAL" word.
+    cue_word_h = float(exp.get("cue_word_height", 0.20))
+    cue_prefix_h = float(exp.get("cue_prefix_height", 0.05))
+    cue_word = visual.TextStim(win, text="", color=txt_color, height=cue_word_h,
+                               bold=True, pos=(0, 0), alignText="center")
+    cue_prefix = visual.TextStim(
+        win, text=exp.get("cue_prefix_text", "attend to"), color=txt_color,
+        height=cue_prefix_h, pos=(0, (cue_word_h + cue_prefix_h) * 0.6),
+        alignText="center")
+    cue_space = visual.TextStim(win, text="Press SPACE to start", color=txt_color,
+                                height=cue_prefix_h * 0.85,
+                                pos=(0, -(cue_word_h * 0.5 + cue_prefix_h * 1.5)))
+
     # --- Photodiode trigger square (shown for the whole gap) ----------------
     trigger = _make_trigger(win, visual, cfg)
     if trigger is not None:
@@ -326,8 +339,8 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
         win, color=txt_color, height=0.045, wrapWidth=1.5, alignText="center",
         text=("Keep your eyes on the central fixation dot throughout.\n\n"
               "Before each trial you will be told which stream to attend:\n"
-              "AUDIO — listen for the spoken words.\n"
-              "VISUAL — count the events (e.g. row clears / reversals).\n\n"
+              f"AUDIO — {_attend_hint('Audio', visual_mode).lower()}\n"
+              f"VISUAL — {_attend_hint('Visual', visual_mode).lower()}\n\n"
               "Press SPACE to begin, or ESC to quit.")).draw()
     win.flip()
     event.clearEvents()
@@ -425,15 +438,12 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
         if focus_mode == "auto":
             attended = assigned_focus
             choice_key = "auto"
-            cue_text = f"Attend to the {attended.upper()}"
-            hint = _attend_hint(attended, visual_mode)
-            if hint:
-                cue_text += f"\n{hint}"
-            if start_on_space:
-                cue_text += "\n\nPress SPACE to start"
-            visual.TextStim(win, text=cue_text, color=txt_color, height=0.06,
-                            wrapWidth=1.4, alignText="center").draw()
+            cue_word.text = attended.upper()      # big "AUDIO" / "VISUAL"
+            cue_prefix.draw()                     # small "attend to" above it
+            cue_word.draw()
             counter.draw()
+            if start_on_space:
+                cue_space.draw()
             win.flip()
             instr_clock = core.Clock()
             event.clearEvents()

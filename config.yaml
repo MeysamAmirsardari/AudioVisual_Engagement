@@ -79,6 +79,10 @@ experiment:
   start_on_space: false           # false = the cue auto-advances after cue_seconds
                                   #         (no key press needed to start a trial)
                                   # true  = the cue waits for SPACE (self-paced)
+  # Focus cue layout: a small "attend to" line above a big "AUDIO" / "VISUAL".
+  cue_prefix_text: "attend to"
+  cue_prefix_height: 0.05         # height (height units) of the small prefix line
+  cue_word_height: 0.20           # height of the big AUDIO / VISUAL word
 
 # ---------------------------------------------------------------------------
 # Attention-check probe (shown after the block). Format: yes / no.

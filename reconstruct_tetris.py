@@ -45,10 +45,11 @@ def reconstruct(record_path: str, out_dir: str, fps: float | None,
     with open(record_path, encoding="utf-8") as f:
         rec = json.load(f)
 
-    game = TetrisGame(
-        cols=int(rec["cols"]), rows=int(rec["rows"]), seed=int(rec["seed"]),
-        tick_interval_s=float(rec["tick_interval_s"]),
-        flash_s=float(rec["flash_s"]))
+    if "inputs" in rec or str(rec.get("engine", "")).startswith("tetris_game"):
+        game = TetrisGame.from_record(rec)             # replay the player's exact game
+    else:                                              # legacy self-playing record
+        game = TetrisGame(cols=int(rec["cols"]), rows=int(rec["rows"]),
+                          seed=int(rec["seed"]), mode="ai", on_top_out="reset")
     cell = int(rec.get("render_cell_px", 14))
     duration = float(rec.get("block_duration_s", 0.0))
 

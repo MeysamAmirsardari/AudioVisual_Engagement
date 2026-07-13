@@ -128,8 +128,13 @@ visual:
     rows: 20                      # board height in cells
     board_height: 0.5             # on-screen board height (height units); width
                                   # follows from cols/rows (compact + centred)
-    speed_s_per_step: 0.045       # GAME SPEED: seconds per move/gravity step
-                                  # (smaller = faster). ~0.045 -> ~1 piece/second.
+    # DIFFICULTY (the subject now plays the game):
+    start_level: 0                # starting gravity level (0 = slow .. higher = faster);
+                                  #   also rises every 10 cleared lines
+    gravity_scale: 1.0            # multiplies the whole speed curve (0.5 = twice as fast,
+                                  #   2.0 = half speed) — the fine difficulty knob
+    lock_delay_ticks: 30          # grace ticks (@60 Hz) before a resting piece locks
+                                  #   (higher = more forgiving)
     flash_s: 0.18                 # how long cleared rows flash before disappearing
     render_cell_px: 14            # pixels per cell (on-screen texture + mp4 size)
     show_fixation: true           # central fixation dot (maintain fixation)

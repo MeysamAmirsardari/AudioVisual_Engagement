@@ -399,12 +399,16 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                 btarget, float(g.get("switch_min_interval_s", 1.2)),
                 float(g.get("switch_max_interval_s", 3.5)), rng)
         elif visual_mode == "tetris":
-            # Deterministic per-trial game (seed = base + master seed + trial).
+            # Deterministic per-trial game the subject PLAYS with the arrow keys
+            # (seed = base + master seed + trial). on_top_out="reset" keeps the
+            # stimulus running if they top out mid-trial.
             game_seed = int(tcfg.get("seed_base", 0)) + seed + trial_idx
             game = TetrisGame(
                 cols=int(tcfg.get("cols", 10)), rows=int(tcfg.get("rows", 20)),
-                seed=game_seed,
-                tick_interval_s=float(tcfg.get("speed_s_per_step", 0.045)),
+                seed=game_seed, mode="player", on_top_out="reset",
+                start_level=int(tcfg.get("start_level", 0)),
+                gravity_scale=float(tcfg.get("gravity_scale", 1.0)),
+                lock_delay_ticks=int(tcfg.get("lock_delay_ticks", 30)),
                 flash_s=float(tcfg.get("flash_s", 0.18)))
         elif movie is not None:
             # Seek to the random offset now (pre-onset), so the decode latency is
@@ -504,14 +508,24 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                         aborted = True
                         break
             elif visual_mode == "tetris":
-                # Advance the self-playing game frame-by-frame. Record the exact
-                # display frame times (relative to onset) so the game can be
-                # reconstructed to mp4 afterwards.
+                # The subject PLAYS the game: poll the control keys each frame, feed
+                # them to the engine, advance, and draw. Record the exact display
+                # frame times (relative to onset) so the played game can be
+                # reconstructed frame-for-frame afterwards.
                 cell_px = int(tcfg.get("render_cell_px", 14))
+                keymap = {"left": "left", "right": "right", "up": "cw", "z": "ccw",
+                          "down": "soft", "space": "hard", "c": "hold"}
                 prev_t = 0.0
                 frame_times: list[float] = []
                 while block_clock.getTime() < btarget:
                     t = block_clock.getTime()
+                    for k in event.getKeys(keyList=list(keymap) + ["escape"]):
+                        if k == "escape":
+                            aborted = True
+                            break
+                        game.press(keymap[k])          # buffered; applied on next tick
+                    if aborted:
+                        break
                     game.update(t - prev_t)
                     prev_t = t
                     tetris_stim.image = game.to_image(cell_px)
@@ -520,27 +534,19 @@ def run_session(cfg: dict, paths: cc.Paths, manifest: dict, subject: str,
                         tetris_fix.draw()
                     win.flip()
                     frame_times.append(round(block_clock.getTime(), 5))
-                    if event.getKeys(keyList=["escape"]):
-                        aborted = True
-                        break
                 tetris_clears = game.line_clear_events
                 tetris_max_height = game.max_stack_height
+                # The engine's record() holds the seed + every keystroke by tick +
+                # the full stats -> the played game replays bit-for-bit. Add the
+                # on-screen render params and display frame times for reconstruction.
                 game_record_file = _save_game_record(
                     paths, subject, session_ts, trial_idx, {
-                        "seed": game_seed,
-                        "cols": int(tcfg.get("cols", 10)),
-                        "rows": int(tcfg.get("rows", 20)),
-                        "tick_interval_s": float(tcfg.get("speed_s_per_step", 0.045)),
-                        "flash_s": float(tcfg.get("flash_s", 0.18)),
+                        **game.record(),
                         "render_cell_px": cell_px,
                         "refresh_hz": round(refresh_hz, 3),
                         "block_duration_s": round(block_clock.getTime(), 4),
                         "n_display_frames": len(frame_times),
                         "frame_times_s": frame_times,
-                        "line_clear_events": tetris_clears,
-                        "rows_cleared": game.rows_cleared,
-                        "max_stack_height": tetris_max_height,
-                        "resets": game.resets,
                     })
             else:
                 speed = float(vis["gabor"].get("rotation_speed_dps", 75.0))
@@ -909,12 +915,29 @@ def _start_webcam(cfg, subject, tag, win, visual, core, txt_color):
 # Behaviour logging
 # ===========================================================================
 def _append_behavior_csv(paths: cc.Paths, record: dict) -> None:
-    """Append one trial row to behavior/<subject>.csv (header on first write)."""
+    """
+    Append one trial row to behavior/<subject>.csv (header on first write).
+
+    Guard against silent corruption: if an existing file has a DIFFERENT column
+    schema (e.g. a stale CSV from another code version), never append into it —
+    write to a fresh timestamped file instead and warn.
+    """
     os.makedirs(paths.behavior_dir, exist_ok=True)
+    fields = list(record.keys())
     csv_path = os.path.join(paths.behavior_dir, f"{record['subject']}.csv")
+    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            existing = next(csv.reader(f), [])
+        if existing != fields:
+            alt = os.path.join(paths.behavior_dir,
+                               f"{record['subject']}_{record.get('timestamp', 'x')}.csv")
+            cc.log(f"WARNING: {os.path.basename(csv_path)} has a different column "
+                   f"schema; writing this row to {os.path.basename(alt)} to avoid "
+                   f"corrupting it.")
+            csv_path = alt
     write_header = not os.path.exists(csv_path)
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(record.keys()))
+        w = csv.DictWriter(f, fieldnames=fields)
         if write_header:
             w.writeheader()
         w.writerow(record)

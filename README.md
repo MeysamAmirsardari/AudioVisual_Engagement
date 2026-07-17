@@ -1,4 +1,4 @@
-# cross_modal_attention
+# AudioVisual_Engagement
 
 A cross-modal (audio **vs.** visual) selective-attention paradigm in PsychoPy,
 designed for EEG. A subject chooses which stream to attend, watches a muted

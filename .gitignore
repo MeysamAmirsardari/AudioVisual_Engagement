@@ -235,3 +235,8 @@ webcam/
 
 # Tetris reconstruction records + rendered mp4s (per-subject data)
 games/
+
+# Large raw recordings — keep local, never commit (purged from history 2026-07-17)
+*.eeg
+*.xdf
+*.fif

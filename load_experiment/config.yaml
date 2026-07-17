@@ -1,0 +1,145 @@
+# ============================================================================
+# LOAD-MODULATION audio-visual experiment — configuration
+# ----------------------------------------------------------------------------
+# The subject PLAYS a Tetris game whose difficulty varies trial-to-trial (no
+# attention instruction); a speech clip plays in the background and an audio
+# comprehension probe + a beep reaction-time probe follow every trial. Audio is
+# played AND streamed on LSL with hardware DAC timestamps (see lsl_audio.py).
+#
+# Reuses the SHARED stimulus library prepared by the parent experiment's
+# build_stimuli.py (../stims). Run that once in the parent project if needed.
+# ============================================================================
+
+paths:
+  stim_dir: ../stims                 # SHARED audio library (parent project)
+  audio_subdir: audio                # -> ../stims/audio/<id>.wav + <id>.words.json
+  manifest: ../stims/manifest.json
+  data_root: data                    # per-subject/session outputs live under load_experiment/data
+  behavior_dir: behavior
+  games_dir: games
+
+# ---------------------------------------------------------------------------
+# Presentation
+# ---------------------------------------------------------------------------
+experiment:
+  fullscreen: true
+  bg_color: black
+  text_color: white
+  fallback_refresh_hz: 60.0          # used only if the refresh rate can't be measured
+
+  # FIXED master seed -> reproducible session (audio order, difficulty order, gap
+  # jitter, every Tetris seed). Override per run with `--seed`.
+  seed: 20240601
+
+  n_trials: 60                       # trials back-to-back in one session
+  block_seconds: 40.0                # each trial's Tetris block length
+  inter_trial_interval_s: 0.8        # blank fixation between trials
+  ready_seconds: 1.0                 # "Get ready" screen length (auto-advances)
+  start_on_space: false              # true = wait for SPACE to start each trial
+  gap_seconds: 2.0                   # BASE fixation gap before each block (jittered)
+
+  # Trial-to-trial gap jitter to decorrelate onsets for EEG (Gaussian, clamped).
+  jitter:
+    enabled: true
+    std_ms: 150
+    max_ms: 300
+
+# ---------------------------------------------------------------------------
+# Difficulty tiers = the implicit cognitive-load manipulation. Balanced across
+# trials and randomly ordered (no attention cue). Each tier sets the Tetris speed:
+#   start_level     initial gravity level (0 slow .. ~19 fast; +1 every 10 lines)
+#   gravity_scale   multiplies the whole speed curve (smaller = FASTER; 0.5 = 2x)
+#   lock_delay_ticks grace ticks (@60 Hz) before a resting piece locks (higher = easier)
+# ---------------------------------------------------------------------------
+difficulty:
+  levels:
+    - {name: very_easy,  start_level: 0,  gravity_scale: 1.6, lock_delay_ticks: 45}
+    - {name: easy,       start_level: 2,  gravity_scale: 1.2, lock_delay_ticks: 35}
+    - {name: medium,     start_level: 5,  gravity_scale: 1.0, lock_delay_ticks: 30}
+    - {name: hard,       start_level: 9,  gravity_scale: 1.2, lock_delay_ticks: 27}
+    - {name: very_hard,  start_level: 13, gravity_scale: 1.0, lock_delay_ticks: 23}
+    - {name: super_hard, start_level: 18, gravity_scale: 0.9, lock_delay_ticks: 18}
+
+# ---------------------------------------------------------------------------
+# Low-jitter LSL audio (lsl_audio.py). The clip plays through PortAudio and its
+# waveform is streamed on LSL, every block timestamped at the true DAC output
+# time (bypassing sound-card buffering jitter). Opened once for the whole session.
+# ---------------------------------------------------------------------------
+lsl:
+  enabled: true
+  required: true                     # abort the session if the audio/LSL engine won't open
+  device: default                    # default | device index (int) | name substring
+  blocksize: 256                     # frames per audio callback (smaller = lower latency)
+  latency: low                       # PortAudio latency hint: low | high | <seconds>
+  amp: 0.9                           # global playback gain (0..1)
+  audio_stream_name: ExpAudio        # LSL "Audio" stream (the mono waveform)
+  marker_stream_name: ExpAudioMarkers  # LSL "Markers" stream (discrete JSON events)
+  source_id: load_experiment_audio
+
+# ---------------------------------------------------------------------------
+# Post-trial beep + speeded response (extra vigilance/arousal cue). Its onset gets
+# a DAC-timestamped LSL marker AND a photodiode square pulse (hardware timing).
+# ---------------------------------------------------------------------------
+beep:
+  enabled: true
+  freq_hz: 1000
+  duration_s: 0.1
+  amp: 0.6
+  response_keys: [space]             # keys that count as the beep response
+  response_window_s: 1.5             # collect the response for up to this long
+  photodiode_pulse_s: 0.05           # flash the photodiode square this long at beep onset
+
+# ---------------------------------------------------------------------------
+# Audio comprehension probe (yes/no), asked EVERY trial. Auto-generated per clip
+# by the builder: a "was WORD spoken?" probe with the correct answer balanced.
+# ---------------------------------------------------------------------------
+probe:
+  format: yes_no
+  keys: {"yes": right, "no": left}   # QUOTE yes/no — unquoted, YAML reads them as booleans
+
+  quit_key: escape
+  instruction: "About the speech you just heard:"
+  audio:
+    strategy: word_present
+    min_word_len: 4
+
+# ---------------------------------------------------------------------------
+# Visual stimulus: the Tetris the subject PLAYS. Speed/difficulty per trial comes
+# from the `difficulty` tiers above; these are the fixed rendering/geometry params.
+# ---------------------------------------------------------------------------
+visual:
+  mode: tetris
+  tetris:
+    cols: 10
+    rows: 20
+    board_height: 0.5                # on-screen board height (height units)
+    lock_delay_ticks: 30             # default; overridden per trial by the difficulty tier
+    flash_s: 0.18                    # cleared-row flash duration
+    render_cell_px: 14               # pixels per cell
+    show_fixation: true              # central fixation dot
+    flip_vertical: true              # keep the stack at the bottom
+    seed_base: 0                     # combined with master seed + trial index
+
+# ---------------------------------------------------------------------------
+# Photodiode trigger square (kept). Shown for the whole gap (rising edge = gap
+# onset, falling edge = AV onset) and pulsed at the beep.
+# ---------------------------------------------------------------------------
+trigger:
+  enabled: true
+  size_px: 100
+  color: white
+  corner: bottom-right               # bottom-right | bottom-left | top-right | top-left
+
+# ---------------------------------------------------------------------------
+# Webcam monitoring (optional; separate process so it never perturbs draw timing).
+# ---------------------------------------------------------------------------
+webcam:
+  enabled: true
+  dir: webcam
+  device: 0
+  fps: 0
+  resolution: [640, 480]
+  fourcc: mp4v
+  container: mp4
+  required: false
+  max_seconds: 2400

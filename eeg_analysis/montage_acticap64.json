@@ -1,0 +1,27 @@
+{
+  "_README": [
+    "TEMPLATE — VERIFY BEFORE USE. This maps each recorded channel name (a bare",
+    "physical electrode number, as it appears in the .vhdr) to a 10-20 label,",
+    "using the standard BrainProducts actiCAP 64Ch 'Standard-2' arrangement.",
+    "Physical channel 2 is the online reference and is absent from the data, so it",
+    "is intentionally not among the recorded channels. Different actiCHamp caps /",
+    "shipments can use a different ordering: confirm this against YOUR cap's",
+    "montage file before enabling preprocess.apply_montage. Getting it wrong only",
+    "corrupts spatial views (topographies / interpolation), never the decoding."
+  ],
+  "map": {
+    "1": "Fp1",  "2": "Fz",   "3": "F3",   "4": "F7",   "5": "FT9",
+    "6": "FC5",  "7": "FC1",  "8": "C3",   "9": "T7",   "10": "TP9",
+    "11": "CP5", "12": "CP1", "13": "Pz",  "14": "P3",  "15": "P7",
+    "16": "O1",  "17": "Oz",  "18": "O2",  "19": "P4",  "20": "P8",
+    "21": "TP10","22": "CP6", "23": "CP2", "24": "Cz",  "25": "C4",
+    "26": "T8",  "27": "FT10","28": "FC6", "29": "FC2", "30": "F4",
+    "31": "F8",  "32": "Fp2", "33": "AF7", "34": "AF3", "35": "AFz",
+    "36": "F1",  "37": "F5",  "38": "FT7", "39": "FC3", "40": "FCz",
+    "41": "C1",  "42": "C5",  "43": "TP7", "44": "CP3", "45": "P1",
+    "46": "P5",  "47": "PO7", "48": "PO3", "49": "POz", "50": "PO4",
+    "51": "PO8", "52": "P6",  "53": "P2",  "54": "CPz", "55": "CP4",
+    "56": "TP8", "57": "C6",  "58": "C2",  "59": "FC4", "60": "FT8",
+    "61": "F6",  "62": "AF8", "63": "AF4", "64": "F2"
+  }
+}

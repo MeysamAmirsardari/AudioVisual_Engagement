@@ -1,0 +1,77 @@
+{
+  "created": "2026-07-11T19:59:51",
+  "pipeline": "cgx load-modulation",
+  "subject": "Meysam_S002",
+  "n_valid_trials": 30,
+  "steps": [],
+  "behaviour": {
+    "probe_acc_by_level": {
+      "very_easy": 0.4,
+      "easy": 1.0,
+      "medium": 0.8,
+      "hard": 0.8,
+      "very_hard": 1.0,
+      "super_hard": 0.6
+    }
+  },
+  "bad_channels": [
+    "Fp1",
+    "P7",
+    "PO7"
+  ],
+  "ica": {
+    "excluded": [],
+    "n_components": 20
+  },
+  "star_fraction_repaired": 0.21752311784824563,
+  "graded": {
+    "frontal_theta": {
+      "rho": -0.2085872968719227,
+      "p": 0.2686588440540493
+    },
+    "parietal_alpha": {
+      "rho": -0.8422416798017637,
+      "p": 5.37078678733396e-09
+    }
+  },
+  "models": {
+    "bandpower+LDA": {
+      "acc": 0.9666666666666667,
+      "auc": 0.9911111111111112,
+      "perm_p": 0.001996007984031936,
+      "null_p95": 0.7
+    },
+    "Riemann TS+LR": {
+      "acc": 0.9,
+      "auc": 0.9377777777777778,
+      "perm_p": 0.001996007984031936,
+      "null_p95": 0.7
+    },
+    "CSP+LDA": {
+      "acc": 0.8,
+      "auc": 0.8755555555555556,
+      "perm_p": 0.005988023952095809,
+      "null_p95": 0.7
+    }
+  },
+  "best_model": "bandpower+LDA",
+  "bands": {
+    "theta": [
+      4,
+      8
+    ],
+    "alpha": [
+      8,
+      13
+    ],
+    "beta": [
+      13,
+      30
+    ],
+    "gamma": [
+      30,
+      45
+    ]
+  },
+  "n_permutations": 500
+}

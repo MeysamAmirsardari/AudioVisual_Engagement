@@ -1,0 +1,68 @@
+{
+  "created": "2026-07-15T00:10:43",
+  "subject": "sub001_Kavin",
+  "session": 1,
+  "hypothesis": "visual distraction reduces speech tracking more at higher hierarchy levels",
+  "n_trials": 60,
+  "n_focused": 30,
+  "n_distracted": 30,
+  "levels": [
+    "envelope",
+    "word_onset",
+    "word_frequency",
+    "gpt2_surprisal"
+  ],
+  "kinds": [
+    "acoustic",
+    "lexical",
+    "lexical",
+    "linguistic"
+  ],
+  "method": "aud_cca regularised CCA (cca2), top-5 canonical r",
+  "tracking_focused": {
+    "envelope": 0.13125178804531834,
+    "word_onset": 0.09630737317305356,
+    "word_frequency": 0.08572122020590475,
+    "gpt2_surprisal": 0.10150477829388747
+  },
+  "tracking_distracted": {
+    "envelope": 0.1348284719533644,
+    "word_onset": 0.09372296286323929,
+    "word_frequency": 0.08392820552884483,
+    "gpt2_surprisal": 0.0944377203723987
+  },
+  "distraction_effect_d": {
+    "envelope": -0.10257192429303778,
+    "word_onset": 0.08203495077209458,
+    "word_frequency": 0.061560971639480926,
+    "gpt2_surprisal": 0.2060653865730985
+  },
+  "distraction_effect_ci": {
+    "envelope": [
+      -0.6090009972201982,
+      0.3997975716162348
+    ],
+    "word_onset": [
+      -0.445326466932557,
+      0.5855114012576296
+    ],
+    "word_frequency": [
+      -0.46832750912688675,
+      0.5601477582611384
+    ],
+    "gpt2_surprisal": [
+      -0.276193030627152,
+      0.7727381638763342
+    ]
+  },
+  "per_level_perm_p": {
+    "envelope": 0.638,
+    "word_onset": 0.368,
+    "word_frequency": 0.391,
+    "gpt2_surprisal": 0.1965
+  },
+  "trend": {
+    "spearman_rho": 0.7999999999999999,
+    "spearman_p": 0.20000000000000007
+  }
+}

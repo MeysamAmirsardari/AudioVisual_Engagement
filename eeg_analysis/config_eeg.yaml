@@ -1,0 +1,140 @@
+# ============================================================================
+# Cross-modal attention — EEG analysis pipeline configuration
+# ----------------------------------------------------------------------------
+# One place for every knob. `run_eeg_pipeline.py` reads this file; any value can
+# be overridden on the command line (e.g. --subject, --vhdr, --behavior).
+#
+# GOAL of the pipeline
+# --------------------
+# Clean the 64-channel recording and DECODE the *anticipatory gap* — the window
+# between the attention INSTRUCTION ("attend to AUDIO / VISUAL") and the onset of
+# the audiovisual STIMULUS. During that gap the screen is identical across
+# conditions (fixation + photodiode square), so anything decodable there reflects
+# the participant's internal attentional set, not a stimulus difference.
+# Decoding target = attended modality (Audio vs Visual). Probe responses are
+# irrelevant here and are ignored, by design.
+# ============================================================================
+
+dataset:
+  # BrainVision header of the continuous recording.
+  vhdr: records/results/sub001/eeg/audvis64_sub001.vhdr
+  # Behaviour session log that holds the per-trial attended-modality labels and
+  # the wall-clock timestamps used to align markers -> trials. If null the
+  # pipeline auto-discovers the best match by recording start time + trial count.
+  behavior: data/Kavin/1/behavior/Kavin_20260701_163520_session.json
+  subject: sub001
+  line_freq: 60                    # mains frequency (US = 60); used for QC only
+
+# ---------------------------------------------------------------------------
+# Photodiode markers.
+#   The photodiode square is drawn for the whole gap: its RISING edge = gap onset
+#   (= instruction offset) and its FALLING edge = audiovisual onset. Each edge is
+#   logged by the amplifier as a paired trigger (`S 15` then `S 14`, ~11 ms apart
+#   — a single luminance transition captured twice). We use the `S 15` sample as
+#   the edge time and discard the `S 14` twin.
+# ---------------------------------------------------------------------------
+markers:
+  edge_code: "Stimulus/S 15"       # annotation description of the primary edge
+  twin_code: "Stimulus/S 14"       # its ~11 ms flicker twin (ignored)
+  gap_lo_s: 1.4                    # a within-trial gap lasts this long, at least
+  gap_hi_s: 2.6                    # ... and at most (base 2.0 s +/- 0.3 s jitter)
+
+# ---------------------------------------------------------------------------
+# Marker <-> behaviour alignment. Every edge is matched to a behaviour event
+# (gap-onset or av-onset) by absolute wall-clock time under a single constant
+# clock offset, found by maximising the number of edges that land near an event.
+# ---------------------------------------------------------------------------
+alignment:
+  match_tol_s: 0.060               # an edge counts as "matched" within this
+  offset_search_s: 3.0             # search the clock offset over +/- this range
+  min_usable_trials: 12            # abort if fewer trials survive alignment
+
+# ---------------------------------------------------------------------------
+# Cleaning / preprocessing.
+# ---------------------------------------------------------------------------
+preprocess:
+  l_freq: 1.0                      # FIR high-pass (Hz): drifts out, ICA-friendly
+  h_freq: 40.0                     # FIR low-pass (Hz): line noise + EMG out
+  notch: null                      # e.g. 60 to notch mains; null since h_freq<line
+  resample_hz: 250                 # downsample AFTER filtering (decoding speed)
+
+  reference: average               # average | none  (data is online-ref'd to ch2)
+
+  # Montage. The channels are recorded as bare physical numbers (1,3,4,...,64),
+  # so positions are UNKNOWN unless we assert a cap layout. When enabled we rename
+  # the numbered channels via montage_map and set a standard_1005 montage; this
+  # unlocks topographies, spherical-spline interpolation and (if installed)
+  # ICLabel. DECODING DOES NOT DEPEND ON THIS — it is spatial visualisation only.
+  # Default OFF: only turn on after VERIFYING montage_map against your actual cap.
+  apply_montage: false
+  montage_map: montage_acticap64.json
+  montage_name: standard_1005
+
+  bad_channels:
+    detect: true                   # robust auto-detection (variance + flatness)
+    zscore: 4.0                    # |z(log-variance)| above this -> bad
+    flat_uv: 0.5                   # p2p below this (uV) over the run -> flat/bad
+    manual: []                     # force-mark extra channels, e.g. ["7","53"]
+    # With a montage bad channels are interpolated; without one they are dropped.
+
+  ica:
+    enable: true
+    n_components: 0.99             # float = variance kept; or an integer count
+    method: infomax                # infomax (native) | picard | fastica
+    fit_decim: 4                   # decimate while fitting ICA (speed)
+    eog_proxy: ["1", "32"]         # frontal channels used as EOG proxies
+                                   #   (Fp1/Fp2 in the assumed layout)
+    eog_threshold: 3.0             # z-threshold for ocular component detection
+    muscle: true                   # also flag high-frequency muscle components
+    use_iclabel: true             # use ICLabel if mne-icalabel is installed
+    iclabel_prob: 0.80             # min prob to reject a non-brain IC via ICLabel
+
+# ---------------------------------------------------------------------------
+# Epoching, time-locked to GAP ONSET (t = 0 = instruction offset / photodiode up).
+#   [-1.5, 0)  = instruction/cue on screen ("attend to AUDIO/VISUAL")
+#   [0, +gap)  = anticipatory gap (identical screen across conditions)
+#   +gap       = audiovisual onset (>= 1.80 s for every usable trial)
+# ---------------------------------------------------------------------------
+epochs:
+  tmin: -1.7                       # 0.2 s of truly pre-instruction data
+  tmax: 1.5                        # <= the shortest gap -> never leaks the stimulus
+  baseline: [-1.7, -1.5]           # pre-instruction baseline (label-neutral)
+  reject_uv: 150.0                 # drop epochs with p2p above this (uV); null=off
+  event_id:                        # decode label -> integer code
+    Audio: 1
+    Visual: 2
+
+# ---------------------------------------------------------------------------
+# Decoding. Workhorse = shrinkage LDA (the robust M/EEG default for small n).
+# ---------------------------------------------------------------------------
+decode:
+  classifier: lda_shrinkage        # lda_shrinkage | logreg
+  cv_folds: 5
+  cv_repeats: 4                    # repeat stratified CV and average (stability)
+  scoring: roc_auc
+  n_permutations: 1000             # label-shuffle test for the whole-window score
+  n_perm_time: 200                 # label-shuffle null for the time-resolved curve
+                                   #   (max-statistic / FWER-corrected across time)
+  random_state: 42
+
+  # The clean anticipatory window (post-instruction, pre-stimulus, identical
+  # screen). This is the headline "decode the gap" analysis.
+  gap_window: [0.0, 1.5]
+
+  # The cue-viewing window. Decoding here is EXPECTED and partly a visual confound
+  # (the word AUDIO vs VISUAL differs on screen); reported for contrast.
+  cue_window: [-1.5, 0.0]
+
+  time_resolved: true              # AUC(t) across the whole epoch + cluster test
+  temporal_generalization: true    # train-time x test-time generalisation matrix
+  alpha_analysis: true             # anticipatory alpha (8-14 Hz) power + decoding
+  alpha_band: [8.0, 14.0]
+
+# ---------------------------------------------------------------------------
+# Outputs.
+# ---------------------------------------------------------------------------
+output:
+  root: records/derivatives/eeg_pipeline   # everything is written under here/<subject>/
+  save_clean_raw: true             # write the cleaned continuous file (.fif)
+  save_epochs: true                # write the epoched data (-epo.fif)
+  report_html: true                # a single self-contained MNE HTML report

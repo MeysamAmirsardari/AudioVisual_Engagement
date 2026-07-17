@@ -1,0 +1,187 @@
+# ============================================================================
+# Cross-modal attention — STIMULUS-RESPONSE attention decoding
+# ----------------------------------------------------------------------------
+# Decodes the ATTENDED modality from the audiovisual BLOCK (not the anticipatory
+# gap) by measuring how strongly the EEG tracks each stream:
+#   * AUDITORY  — reconstruct the speech ENVELOPE from EEG (backward TRF + CCA).
+#                 reconstruction accuracy = auditory tracking index.
+#   * VISUAL    — ENCODE a visual EMBEDDING (motion energy + luminance + line-clear
+#                 impulses + frame PCA, reconstructed from the deterministic game
+#                 record) into the EEG (forward TRF). prediction accuracy = visual
+#                 tracking index.
+# Per trial the attended stream is the one the EEG tracks better. We also produce
+# time-resolved decoding and spatiotemporal patterns (TRF topographies).
+# Reuses the alignment from eeg_analysis/ (photodiode av-onset per trial).
+# ============================================================================
+
+dataset:
+  vhdr: records/results/sub001/eeg/audvis64_sub001.vhdr
+  behavior: data/Kavin/1/behavior/Kavin_20260701_163520_session.json
+  games_dir: data/Kavin/1/games          # per-trial Tetris reconstruction records
+  audio_dir: stims/audio                  # <audio_stim_id>.wav
+  subject: sub001
+
+# Photodiode markers + alignment (same conventions as eeg_analysis).
+markers:
+  edge_code: "Stimulus/S 15"
+  twin_code: "Stimulus/S 14"
+  gap_lo_s: 1.4
+  gap_hi_s: 2.6
+alignment:
+  match_tol_s: 0.060
+  offset_search_s: 3.0
+  min_usable_trials: 12
+  # The photodiode square is ON during the gap: rising edge = gap-onset, falling
+  # edge = av-onset. When only ONE edge survives it is ALWAYS the gap-onset
+  # (verified on this recording: only-gap=22, only-av=0). Recover such trials'
+  # av-onset as gap_edge + delay_seconds (frame-counted log delay, anchored to the
+  # real gap edge -- NOT the behaviour wall-clock). Validated vs ground truth on
+  # both-edge trials: |max| 8 ms, all < 1 EEG sample @64Hz. Recovered trials carry
+  # av_reconstructed=True so any analysis can restrict to the 38 hardware-timed.
+  recover_missing_av: true
+
+# ---------------------------------------------------------------------------
+# Preprocessing tuned for stimulus-response modelling.
+# ---------------------------------------------------------------------------
+preprocess:
+  l_freq: 1.0                    # cortical envelope/visual tracking lives in the
+  h_freq: 8.0                    #   delta-theta band (1-8 Hz)
+  resample_hz: 64                # model sample rate (TRF/CCA standard)
+  reference: average
+  apply_montage: true            # needed for topographies + session-level interpolation
+  # GROUND-TRUTH cap geometry: the actual EasyCap-64 file shipped with the recording.
+  # Channels are named by physical electrode number in the .vhdr; this maps each
+  # <Number> -> 10-20 <Name> (BY NAME, so a missing electrode never shifts the rest).
+  # The assumed template (montage_acticap64.json) was correct for ch 1-39 but
+  # SHIFTED BY ONE from ch 40 (posterior/central) -> always use the .bvef.
+  montage_bvef: records/electrode_mapping/CACS-64_NO_REF.bvef
+  montage_map: ../eeg_analysis/montage_acticap64.json   # fallback only (KNOWN wrong 40+)
+  montage_name: standard_1005
+  # CABLE-HALF SWAP: the two coloured 32-channel cables were plugged in REVERSED for
+  # this recording (we assumed 1:32=green/33:64=yellow; the first recordings had
+  # 1:32=yellow/33:64=green). Confirmed empirically: neighbour-correlation (spatial
+  # smoothness of volume-conducted EEG) 0.70 swapped vs 0.44 assumed. When true, a
+  # recorded channel n is placed at electrode n±32. (channel_swap_validate.py)
+  cable_halves_swapped: true
+  # Online reference = the absent recorded channel "2". Under the swap that is AF3
+  # (Fz becomes a normal data channel). Added back as a flat channel -> -average.
+  reference_electrode: "2"
+  # Electrode impedances measured at recording start are stored in the .vhdr [Comment]
+  # block (keyed by recorded input number; the cable swap is applied via num2name).
+  # Any electrode at/above this many kOhm is treated as a poor contact and
+  # interpolated (manufacturer "Bad Level" for this actiCHamp cap = 60 kOhm).
+  impedance_bad_kohm: 60
+  # POST-CLEAN spatial-outlier repair: after ICA + average reference, a channel whose
+  # mean correlation with its nearest neighbours falls below this floor is a focal
+  # "bullseye" (survives raw QC but is damaged by ICA + the average reference; e.g.
+  # FCz) and is interpolated. Low enough to spare good channels merely adjacent to it.
+  post_clean_min_neighbor_corr: 0.20
+  # Bad channels are interpolated ONCE at the session level (not per trial). A
+  # channel is interpolated if the time-varying schedule flags it in at least this
+  # fraction of the session's trials -> keeps the channel geometry constant.
+  session_bad_min_frac: 0.10
+  # Conservative continuous-recording QC supplements the documented schedule.
+  # Any auto-flag is logged with its metrics in <subject>_preprocessing_qc.json;
+  # review that file rather than treating automatic interpolation as invisible.
+  channel_qc:
+    enable: true
+    sample_hz: 125                 # >= 2×45 Hz; avoids a second recording-sized buffer
+    flat_uv: 0.5
+    variance_z: 5.0
+    min_common_corr: -0.15
+    hf_ratio_z: 5.0
+  ica:
+    enable: true
+    n_components: 0.99
+    method: infomax
+    fit_decim: 4
+    eog_proxy: ["Fp1", "Fp2"]    # frontal EOG proxies (channels renamed to labels)
+    eog_threshold: 3.0
+    muscle: true
+    use_iclabel: true
+    iclabel_prob: 0.80
+    fit_band: [1.0, 40.0]        # fit ICA broadband; model filtering happens afterward
+
+  # Time-varying noisy channels (Kavin notes). Keys are inclusive trial ranges
+  # "lo-hi"; values are recorded channel numbers. A channel occurring in at least
+  # session_bad_min_frac is interpolated once for the entire session; rarer
+  # transient artifacts are handled by block rejection, never per-trial geometry.
+  bad_channel_schedule:
+    "21-40": ["24", "26", "27", "60", "63"]
+    "41-60": ["5", "36", "38"]
+
+# ---------------------------------------------------------------------------
+# Block extraction (time-locked to av-onset = audiovisual stimulus onset).
+# ---------------------------------------------------------------------------
+block:
+  seconds: 19.0                  # analysis length per trial (<= block_seconds=20,
+                                 #   trimmed for a safety margin at the tail)
+  onset_pad_s: 0.0               # skip this much after av-onset (onset transient)
+  quality:
+    # Reject an entire block (never interpolate it) only if more than 10% of
+    # channels are flat, non-finite, or have this extreme 19-s p2p amplitude.
+    # This preserves the identical channel geometry required by cross-validated CCA.
+    reject_uv: 250.0
+    min_std_uv: 0.02
+    max_bad_channel_fraction: 0.10
+    min_trials_per_condition: 8   # fail fast rather than fit an unstable CV model
+
+# ---------------------------------------------------------------------------
+# Stimulus features.
+# ---------------------------------------------------------------------------
+stimuli:
+  audio:
+    envelope: hilbert            # broadband Hilbert magnitude
+    power_law: 0.3               # loudness compression env**p (0 disables)
+  f0:                            # pitch-contour descriptor (librosa.pyin, cached)
+    fmin_hz: 75
+    fmax_hz: 400
+    hop: 256                     # 16 kHz / 256 = 62.5 Hz frame rate (~= model fs)
+    cache_dir: records/derivatives/cca_decoding/f0_cache
+  visual:
+    cell_px: 6                   # game re-render resolution for the embedding
+    downsample: [12, 6]          # frame downsampled to (rows, cols) before PCA
+    pca_components: 5            # frame-PCA components in the embedding
+    features: [motion, luminance, clear_impulse, pca]   # embedding channels
+
+# ---------------------------------------------------------------------------
+# TRF / CCA.
+# ---------------------------------------------------------------------------
+model:
+  fwd_tmin_s: -0.10              # forward (encoding) delays: stim -> EEG
+  fwd_tmax_s: 0.50
+  bwd_tmin_s: -0.50             # backward (decoding) delays: EEG -> stim
+  bwd_tmax_s: 0.10
+  ridge_alphas: [1.0e2, 1.0e3, 1.0e4, 1.0e5, 1.0e6]   # selected once by CV
+  cca_components: 3             # top-K canonical components averaged for the index
+  cca_eeg_lags_s: [0.0, 0.30]   # WIDE EEG lags -> models the temporal response (TRF)
+  cca_env_lags_s: [0.0, 0.05]   # TIGHT envelope lags -> just enough columns for K
+  # rCCA hyper-parameters. For the envelope-tracking evaluator these are TUNED per
+  # outer fold by nested K-fold CV over the grids below; cca_n_pca / cca_shrink are
+  # the fixed values used by the (secondary) CCA cross-check in attention.py.
+  cca_n_pca: 60
+  cca_shrink: 0.15
+  cca_n_pca_grid: [40, 80, 120, 160, 220]   # spatial PCA truncation grid (capped by
+                                            #   covariance rank via the rcond cutoff)
+  cca_shrink_grid: [0.005, 0.02, 0.05, 0.15, 0.4]   # covariance shrinkage grid
+  cca_cv_folds: 4               # inner CV folds for hyper-parameter selection
+  occipital_roi: ["O1", "Oz", "O2", "PO7", "PO3", "POz", "PO4", "PO8", "PO7"]
+
+# ---------------------------------------------------------------------------
+# Attention decoding + evaluation.
+# ---------------------------------------------------------------------------
+decode:
+  cv: leave_one_out             # per-trial tracking indices via leave-one-trial-out
+  classifier: lda               # lda | logreg  (on the tracking indices)
+  n_permutations: 2000          # label-shuffle null for accuracy/AUC
+  random_state: 42
+  # time-resolved
+  window_lengths_s: [1, 2, 4, 8, 16]   # decision accuracy vs window length
+  sliding_window_s: 5.0
+  sliding_step_s: 1.0
+
+output:
+  root: records/derivatives/stim_decoding   # -> <root>/<subject>/
+  figures: true
+  report_html: true
+  save_clean_raw: true                     # written by --preprocess-only and full runs
